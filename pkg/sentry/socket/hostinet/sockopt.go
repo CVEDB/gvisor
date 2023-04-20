@@ -59,6 +59,7 @@ type SockOpt struct {
 var SockOpts = []SockOpt{
 	{linux.SOL_IP, linux.IP_ADD_MEMBERSHIP, 0, false, true},
 	{linux.SOL_IP, linux.IP_DROP_MEMBERSHIP, 0, false, true},
+	{linux.SOL_IP, linux.IP_HDRINCL, sizeofInt32, true, true},
 	{linux.SOL_IP, linux.IP_MULTICAST_IF, uint64(linux.SizeOfInetAddr), true, true},
 	{linux.SOL_IP, linux.IP_MULTICAST_LOOP, 0 /* can be 32-bit int or 8-bit uint */, true, true},
 	{linux.SOL_IP, linux.IP_MULTICAST_TTL, 0 /* can be 32-bit int or 8-bit uint */, true, true},
@@ -67,9 +68,10 @@ var SockOpts = []SockOpt{
 	{linux.SOL_IP, linux.IP_RECVORIGDSTADDR, sizeofInt32, true, true},
 	{linux.SOL_IP, linux.IP_RECVTOS, sizeofInt32, true, true},
 	{linux.SOL_IP, linux.IP_RECVTTL, sizeofInt32, true, true},
-	{linux.SOL_IP, linux.IP_TOS, sizeofInt32, true, true},
+	{linux.SOL_IP, linux.IP_TOS, 0 /* Can be 32, 16, or 8 bits */, true, true},
 	{linux.SOL_IP, linux.IP_TTL, sizeofInt32, true, true},
 
+	{linux.SOL_IPV6, linux.IPV6_CHECKSUM, sizeofInt32, true, true},
 	{linux.SOL_IPV6, linux.IPV6_MULTICAST_HOPS, sizeofInt32, true, true},
 	{linux.SOL_IPV6, linux.IPV6_RECVERR, sizeofInt32, true, true},
 	{linux.SOL_IPV6, linux.IPV6_RECVHOPLIMIT, sizeofInt32, true, true},
@@ -81,6 +83,7 @@ var SockOpts = []SockOpt{
 	{linux.SOL_IPV6, linux.IPV6_V6ONLY, sizeofInt32, true, true},
 
 	{linux.SOL_SOCKET, linux.SO_ACCEPTCONN, sizeofInt32, true, true},
+	{linux.SOL_SOCKET, linux.SO_BINDTODEVICE, 0, true, true},
 	{linux.SOL_SOCKET, linux.SO_BROADCAST, sizeofInt32, true, true},
 	{linux.SOL_SOCKET, linux.SO_ERROR, sizeofInt32, true, false},
 	{linux.SOL_SOCKET, linux.SO_KEEPALIVE, sizeofInt32, true, true},
@@ -111,6 +114,8 @@ var SockOpts = []SockOpt{
 	{linux.SOL_TCP, linux.TCP_SYNCNT, sizeofInt32, true, true},
 	{linux.SOL_TCP, linux.TCP_USER_TIMEOUT, sizeofInt32, true, true},
 	{linux.SOL_TCP, linux.TCP_WINDOW_CLAMP, sizeofInt32, true, true},
+
+	{linux.SOL_ICMPV6, linux.ICMPV6_FILTER, uint64(linux.SizeOfICMP6Filter), true, true},
 }
 
 // sockOptMap is a map of {level, name} -> SockOpts. It is an optimization for
@@ -169,9 +174,21 @@ func (s *Socket) GetSockOpt(t *kernel.Task, level, name int, optValAddr hostarch
 	if sockOpt.Size > 0 {
 		// Validate size of input buffer.
 		if uint64(optLen) < sockOpt.Size {
-			// Special case for TCP_INFO. We allow smaller buffers, and
-			// only fill up what we can.
-			if level != linux.SOL_TCP || name != linux.TCP_INFO {
+			// Special case for options that allow smaller buffers.
+			//
+			// To keep the syscall filters simple and restrictive,
+			// we use the full buffer size when calling the host,
+			// but truncate before returning to the application.
+			switch {
+			case level == linux.SOL_TCP && name == linux.TCP_INFO:
+				// Allow smaller buffer.
+			case level == linux.SOL_ICMPV6 && name == linux.ICMPV6_FILTER:
+				// Allow smaller buffer.
+			case level == linux.SOL_IP && name == linux.IP_TTL:
+				// Allow smaller buffer.
+			case level == linux.SOL_IPV6 && name == linux.IPV6_TCLASS:
+				// Allow smaller buffer.
+			default:
 				return nil, syserr.ErrInvalidArgument
 			}
 		}
@@ -190,9 +207,8 @@ func (s *Socket) GetSockOpt(t *kernel.Task, level, name int, optValAddr hostarch
 		return nil, syserr.FromError(err)
 	}
 	opt = postGetSockOpt(t, level, name, opt)
-	// Special-case for TCP_INFO. We truncate the buffer to whatever size
-	// the user requested.
-	if level == linux.SOL_TCP && name == linux.TCP_INFO && uint64(optLen) < sockOpt.Size {
+	// If option allows a smaller buffer, truncate it to desired size.
+	if uint64(optLen) < sockOpt.Size {
 		opt = opt[:optLen]
 	}
 	optP := primitive.ByteSlice(opt)

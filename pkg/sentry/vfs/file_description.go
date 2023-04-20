@@ -188,6 +188,11 @@ func (fd *FileDescription) DecRef(ctx context.Context) {
 			fd.impl.UnlockBSD(context.Background(), fd)
 		}
 
+		// Unlock any OFD locks.
+		if fd.impl.SupportsLocks() {
+			fd.impl.UnlockPOSIX(ctx, fd, lock.LockRange{0, lock.LockEOF})
+		}
+
 		// Release implementation resources.
 		fd.impl.Release(ctx)
 		if fd.writable {
@@ -441,7 +446,7 @@ type FileDescriptionImpl interface {
 	ConfigureMMap(ctx context.Context, opts *memmap.MMapOpts) error
 
 	// Ioctl implements the ioctl(2) syscall.
-	Ioctl(ctx context.Context, uio usermem.IO, args arch.SyscallArguments) (uintptr, error)
+	Ioctl(ctx context.Context, uio usermem.IO, sysno uintptr, args arch.SyscallArguments) (uintptr, error)
 
 	// ListXattr returns all extended attribute names for the file.
 	ListXattr(ctx context.Context, size uint64) ([]string, error)
@@ -703,8 +708,8 @@ func (fd *FileDescription) ConfigureMMap(ctx context.Context, opts *memmap.MMapO
 }
 
 // Ioctl implements the ioctl(2) syscall.
-func (fd *FileDescription) Ioctl(ctx context.Context, uio usermem.IO, args arch.SyscallArguments) (uintptr, error) {
-	return fd.impl.Ioctl(ctx, uio, args)
+func (fd *FileDescription) Ioctl(ctx context.Context, uio usermem.IO, sysno uintptr, args arch.SyscallArguments) (uintptr, error) {
+	return fd.impl.Ioctl(ctx, uio, sysno, args)
 }
 
 // ListXattr returns all extended attribute names for the file represented by

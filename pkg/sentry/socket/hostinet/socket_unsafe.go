@@ -31,7 +31,7 @@ import (
 )
 
 func firstBytePtr(bs []byte) unsafe.Pointer {
-	if bs == nil {
+	if len(bs) == 0 {
 		return nil
 	}
 	return unsafe.Pointer(&bs[0])
@@ -55,7 +55,7 @@ func writev(fd int, srcs []unix.Iovec) (uint64, error) {
 	return uint64(n), nil
 }
 
-func ioctl(ctx context.Context, fd int, io usermem.IO, args arch.SyscallArguments) (uintptr, error) {
+func ioctl(ctx context.Context, fd int, io usermem.IO, sysno uintptr, args arch.SyscallArguments) (uintptr, error) {
 	switch cmd := uintptr(args[1].Int()); cmd {
 	case unix.TIOCINQ, unix.TIOCOUTQ:
 		var val int32
@@ -68,7 +68,13 @@ func ioctl(ctx context.Context, fd int, io usermem.IO, args arch.SyscallArgument
 			AddressSpaceActive: true,
 		})
 		return 0, err
-	case unix.SIOCGIFFLAGS:
+	case linux.SIOCGIFFLAGS,
+		linux.SIOCGIFHWADDR,
+		linux.SIOCGIFINDEX,
+		linux.SIOCGIFMTU,
+		linux.SIOCGIFNAME,
+		linux.SIOCGIFNETMASK,
+		linux.SIOCGIFTXQLEN:
 		cc := &usermem.IOCopyContext{
 			Ctx: ctx,
 			IO:  io,
@@ -85,7 +91,7 @@ func ioctl(ctx context.Context, fd int, io usermem.IO, args arch.SyscallArgument
 		}
 		_, err := ifr.CopyOut(cc, args[2].Pointer())
 		return 0, err
-	case unix.SIOCGIFCONF:
+	case linux.SIOCGIFCONF:
 		cc := &usermem.IOCopyContext{
 			Ctx: ctx,
 			IO:  io,
@@ -187,26 +193,6 @@ func ioctl(ctx context.Context, fd int, io usermem.IO, args arch.SyscallArgument
 		}
 
 		return 0, nil
-	case linux.SIOCGIFTXQLEN:
-		cc := &usermem.IOCopyContext{
-			Ctx: ctx,
-			IO:  io,
-			Opts: usermem.IOOpts{
-				AddressSpaceActive: true,
-			},
-		}
-
-		var ifr linux.IFReq
-		if _, err := ifr.CopyIn(cc, args[2].Pointer()); err != nil {
-			return 0, err
-		}
-
-		if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), cmd, uintptr(unsafe.Pointer(&ifr))); errno != 0 {
-			return 0, translateIOSyscallError(errno)
-		}
-
-		_, err := ifr.CopyOut(cc, args[2].Pointer())
-		return 0, err
 	default:
 		return 0, linuxerr.ENOTTY
 	}
@@ -222,11 +208,7 @@ func accept4(fd int, addr *byte, addrlen *uint32, flags int) (int, error) {
 
 func getsockopt(fd int, level, name int, opt []byte) ([]byte, error) {
 	optlen32 := int32(len(opt))
-	var optPtr uintptr
-	if optlen32 > 0 {
-		optPtr = uintptr(firstBytePtr(opt))
-	}
-	_, _, errno := unix.Syscall6(unix.SYS_GETSOCKOPT, uintptr(fd), uintptr(level), uintptr(name), optPtr, uintptr(unsafe.Pointer(&optlen32)), 0)
+	_, _, errno := unix.Syscall6(unix.SYS_GETSOCKOPT, uintptr(fd), uintptr(level), uintptr(name), uintptr(firstBytePtr(opt)), uintptr(unsafe.Pointer(&optlen32)), 0)
 	if errno != 0 {
 		return nil, errno
 	}

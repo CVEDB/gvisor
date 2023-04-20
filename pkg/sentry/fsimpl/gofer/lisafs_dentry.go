@@ -284,30 +284,33 @@ func (d *lisafsDentry) getRemoteChild(ctx context.Context, name string) (*dentry
 
 // Preconditions:
 //   - fs.renameMu must be locked.
-//   - parent.opMu must be locked.
-//   - parent.isDir().
-//   - !rp.Done().
+//   - d.opMu must be locked.
+//   - d.isDir().
+//   - !rp.done() && rp.Component() is not "." or "..".
 //
 // Postcondition: The returned dentry is already cached appropriately.
-func (d *lisafsDentry) getRemoteChildAndWalkPathLocked(ctx context.Context, rp *vfs.ResolvingPath, ds **[]*dentry) (*dentry, error) {
-	// Walk as much of the path as possible in 1 RPC.
-	// Note that pit is a copy of the iterator that does not affect rp.
-	var names []string
-	for pit := rp.Pit(); pit.Ok(); pit = pit.Next() {
-		name := pit.String()
+func (d *lisafsDentry) getRemoteChildAndWalkPathLocked(ctx context.Context, rp resolvingPath, ds **[]*dentry) (*dentry, error) {
+	// Collect as many path components as possible to walk.
+	var namesArr [16]string // arbitrarily sized array to help avoid slice allocation.
+	names := namesArr[:0]
+	rp.getComponents(func(name string) bool {
 		if name == "." {
-			continue
+			return true
 		}
 		if name == ".." {
-			break
+			return false
 		}
 		names = append(names, name)
-	}
-	status, inodes, err := d.controlFD.WalkMultiple(ctx, names)
+		return true
+	})
+	// Walk as much of the path as possible in 1 RPC.
+	_, inodes, err := d.controlFD.WalkMultiple(ctx, names)
 	if err != nil {
 		return nil, err
 	}
 	if len(inodes) == 0 {
+		// d.opMu is locked. So a new child could not have appeared concurrently.
+		// It should be safe to mark this as a negative entry.
 		d.childrenMu.Lock()
 		defer d.childrenMu.Unlock()
 		d.cacheNegativeLookupLocked(names[0])
@@ -371,12 +374,6 @@ func (d *lisafsDentry) getRemoteChildAndWalkPathLocked(ctx context.Context, rp *
 			ret = child
 		}
 	}
-
-	if status == lisafs.WalkComponentDoesNotExist && curParent.isDir() {
-		curParentLock()
-		curParent.cacheNegativeLookupLocked(names[len(inodes)]) // +checklocksforce: locked via curParentLock().
-		curParentUnlock()
-	}
 	return ret, dentryCreationErr
 }
 
@@ -406,8 +403,7 @@ func (d *lisafsDentry) mknod(ctx context.Context, name string, creds *auth.Crede
 		return nil, err
 	}
 	hbep := opts.Endpoint.(transport.HostBoundEndpoint)
-	if err := hbep.SetBoundSocketFD(boundSocketFD); err != nil {
-		boundSocketFD.Close(ctx)
+	if err := hbep.SetBoundSocketFD(ctx, boundSocketFD); err != nil {
 		if err := d.controlFD.UnlinkAt(ctx, name, 0 /* flags */); err != nil {
 			log.Warningf("failed to clean up socket which was created by BindAt RPC: %v", err)
 		}

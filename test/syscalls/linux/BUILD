@@ -2,6 +2,7 @@ load("//tools:arch.bzl", "select_arch")
 load("//tools:defs.bzl", "cc_binary", "cc_library", "gbenchmark", "gtest", "select_system")
 
 package(
+    default_applicable_licenses = ["//:license"],
     default_visibility = ["//:sandbox"],
     licenses = ["notice"],
 )
@@ -1660,6 +1661,9 @@ cc_binary(
     name = "poll_test",
     testonly = 1,
     srcs = ["poll.cc"],
+    copts = [
+        "-Wno-unknown-warning-option",
+    ],
     linkstatic = 1,
     deps = [
         ":base_poll_test",
@@ -3315,6 +3319,7 @@ cc_binary(
         ":socket_netlink_util",
         "//test/util:socket_util",
         gtest,
+        "//test/util:capability_util",
         "//test/util:test_main",
         "//test/util:test_util",
         "@com_google_absl//absl/time",
@@ -3902,6 +3907,7 @@ cc_binary(
     deps = [
         "//test/util:file_descriptor",
         "//test/util:socket_util",
+        "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/time",
         gtest,
         "//test/util:posix_error",
@@ -4076,6 +4082,9 @@ cc_binary(
     name = "uidgid_test",
     testonly = 1,
     srcs = ["uidgid.cc"],
+    copts = [
+        "-Wno-unknown-warning-option",
+    ],
     linkstatic = 1,
     deps = [
         "//test/util:capability_util",

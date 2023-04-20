@@ -28,6 +28,13 @@
 
 #include "sysmsg.h"
 #include "sysmsg_offsets.h"
+#include "sysmsg_offsets_amd64.h"
+
+// TODO(b/271631387): These globals are shared between AMD64 and ARM64; move to
+// sysmsg_lib.c.
+struct arch_state __export_arch_state;
+uint64_t __export_context_decoupling_exp;
+uint64_t __export_stub_start;
 
 long __syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6) {
   unsigned long ret;
@@ -58,70 +65,71 @@ union csgsfs {
   };
 };
 
-static void gregs_to_ptregs(ucontext_t *ucontext, struct sysmsg *sysmsg) {
+static void gregs_to_ptregs(ucontext_t *ucontext,
+                            struct user_regs_struct *ptregs) {
   union csgsfs csgsfs = {.csgsfs = ucontext->uc_mcontext.gregs[REG_CSGSFS]};
 
   // Set all registers except:
   // * fs_base and gs_base, because they can be only changed by arch_prctl.
   // * DS and ES are not used on x86_64.
+  ptregs->r15 = ucontext->uc_mcontext.gregs[REG_R15];
+  ptregs->r14 = ucontext->uc_mcontext.gregs[REG_R14];
+  ptregs->r13 = ucontext->uc_mcontext.gregs[REG_R13];
+  ptregs->r12 = ucontext->uc_mcontext.gregs[REG_R12];
+  ptregs->rbp = ucontext->uc_mcontext.gregs[REG_RBP];
+  ptregs->rbx = ucontext->uc_mcontext.gregs[REG_RBX];
+  ptregs->r11 = ucontext->uc_mcontext.gregs[REG_R11];
+  ptregs->r10 = ucontext->uc_mcontext.gregs[REG_R10];
+  ptregs->r9 = ucontext->uc_mcontext.gregs[REG_R9];
+  ptregs->r8 = ucontext->uc_mcontext.gregs[REG_R8];
+  ptregs->rax = ucontext->uc_mcontext.gregs[REG_RAX];
+  ptregs->rcx = ucontext->uc_mcontext.gregs[REG_RCX];
+  ptregs->rdx = ucontext->uc_mcontext.gregs[REG_RDX];
+  ptregs->rsi = ucontext->uc_mcontext.gregs[REG_RSI];
+  ptregs->rdi = ucontext->uc_mcontext.gregs[REG_RDI];
+  ptregs->rip = ucontext->uc_mcontext.gregs[REG_RIP];
+  ptregs->eflags = ucontext->uc_mcontext.gregs[REG_EFL];
+  ptregs->rsp = ucontext->uc_mcontext.gregs[REG_RSP];
 
-  sysmsg->ptregs.r15 = ucontext->uc_mcontext.gregs[REG_R15];
-  sysmsg->ptregs.r14 = ucontext->uc_mcontext.gregs[REG_R14];
-  sysmsg->ptregs.r13 = ucontext->uc_mcontext.gregs[REG_R13];
-  sysmsg->ptregs.r12 = ucontext->uc_mcontext.gregs[REG_R12];
-  sysmsg->ptregs.rbp = ucontext->uc_mcontext.gregs[REG_RBP];
-  sysmsg->ptregs.rbx = ucontext->uc_mcontext.gregs[REG_RBX];
-  sysmsg->ptregs.r11 = ucontext->uc_mcontext.gregs[REG_R11];
-  sysmsg->ptregs.r10 = ucontext->uc_mcontext.gregs[REG_R10];
-  sysmsg->ptregs.r9 = ucontext->uc_mcontext.gregs[REG_R9];
-  sysmsg->ptregs.r8 = ucontext->uc_mcontext.gregs[REG_R8];
-  sysmsg->ptregs.rax = ucontext->uc_mcontext.gregs[REG_RAX];
-  sysmsg->ptregs.rcx = ucontext->uc_mcontext.gregs[REG_RCX];
-  sysmsg->ptregs.rdx = ucontext->uc_mcontext.gregs[REG_RDX];
-  sysmsg->ptregs.rsi = ucontext->uc_mcontext.gregs[REG_RSI];
-  sysmsg->ptregs.rdi = ucontext->uc_mcontext.gregs[REG_RDI];
-  sysmsg->ptregs.rip = ucontext->uc_mcontext.gregs[REG_RIP];
-  sysmsg->ptregs.eflags = ucontext->uc_mcontext.gregs[REG_EFL];
-  sysmsg->ptregs.rsp = ucontext->uc_mcontext.gregs[REG_RSP];
-
-  sysmsg->ptregs.cs = csgsfs.cs;
-  sysmsg->ptregs.ss = csgsfs.ss;
-  sysmsg->ptregs.fs = csgsfs.fs;
-  sysmsg->ptregs.gs = csgsfs.gs;
+  ptregs->cs = csgsfs.cs;
+  ptregs->ss = csgsfs.ss;
+  ptregs->fs = csgsfs.fs;
+  ptregs->gs = csgsfs.gs;
 }
 
-static void ptregs_to_gregs(ucontext_t *ucontext, struct sysmsg *sysmsg) {
+static void ptregs_to_gregs(ucontext_t *ucontext,
+                            struct user_regs_struct *ptregs) {
   union csgsfs csgsfs = {.csgsfs = ucontext->uc_mcontext.gregs[REG_CSGSFS]};
 
-  ucontext->uc_mcontext.gregs[REG_R15] = sysmsg->ptregs.r15;
-  ucontext->uc_mcontext.gregs[REG_R14] = sysmsg->ptregs.r14;
-  ucontext->uc_mcontext.gregs[REG_R13] = sysmsg->ptregs.r13;
-  ucontext->uc_mcontext.gregs[REG_R12] = sysmsg->ptregs.r12;
-  ucontext->uc_mcontext.gregs[REG_RBP] = sysmsg->ptregs.rbp;
-  ucontext->uc_mcontext.gregs[REG_RBX] = sysmsg->ptregs.rbx;
-  ucontext->uc_mcontext.gregs[REG_R11] = sysmsg->ptregs.r11;
-  ucontext->uc_mcontext.gregs[REG_R10] = sysmsg->ptregs.r10;
-  ucontext->uc_mcontext.gregs[REG_R9] = sysmsg->ptregs.r9;
-  ucontext->uc_mcontext.gregs[REG_R8] = sysmsg->ptregs.r8;
-  ucontext->uc_mcontext.gregs[REG_RAX] = sysmsg->ptregs.rax;
-  ucontext->uc_mcontext.gregs[REG_RCX] = sysmsg->ptregs.rcx;
-  ucontext->uc_mcontext.gregs[REG_RDX] = sysmsg->ptregs.rdx;
-  ucontext->uc_mcontext.gregs[REG_RSI] = sysmsg->ptregs.rsi;
-  ucontext->uc_mcontext.gregs[REG_RDI] = sysmsg->ptregs.rdi;
-  ucontext->uc_mcontext.gregs[REG_RIP] = sysmsg->ptregs.rip;
-  ucontext->uc_mcontext.gregs[REG_EFL] = sysmsg->ptregs.eflags;
-  ucontext->uc_mcontext.gregs[REG_RSP] = sysmsg->ptregs.rsp;
+  ucontext->uc_mcontext.gregs[REG_R15] = ptregs->r15;
+  ucontext->uc_mcontext.gregs[REG_R14] = ptregs->r14;
+  ucontext->uc_mcontext.gregs[REG_R13] = ptregs->r13;
+  ucontext->uc_mcontext.gregs[REG_R12] = ptregs->r12;
+  ucontext->uc_mcontext.gregs[REG_RBP] = ptregs->rbp;
+  ucontext->uc_mcontext.gregs[REG_RBX] = ptregs->rbx;
+  ucontext->uc_mcontext.gregs[REG_R11] = ptregs->r11;
+  ucontext->uc_mcontext.gregs[REG_R10] = ptregs->r10;
+  ucontext->uc_mcontext.gregs[REG_R9] = ptregs->r9;
+  ucontext->uc_mcontext.gregs[REG_R8] = ptregs->r8;
+  ucontext->uc_mcontext.gregs[REG_RAX] = ptregs->rax;
+  ucontext->uc_mcontext.gregs[REG_RCX] = ptregs->rcx;
+  ucontext->uc_mcontext.gregs[REG_RDX] = ptregs->rdx;
+  ucontext->uc_mcontext.gregs[REG_RSI] = ptregs->rsi;
+  ucontext->uc_mcontext.gregs[REG_RDI] = ptregs->rdi;
+  ucontext->uc_mcontext.gregs[REG_RIP] = ptregs->rip;
+  ucontext->uc_mcontext.gregs[REG_EFL] = ptregs->eflags;
+  ucontext->uc_mcontext.gregs[REG_RSP] = ptregs->rsp;
 
-  csgsfs.cs = sysmsg->ptregs.cs;
-  csgsfs.ss = sysmsg->ptregs.ss;
-  csgsfs.fs = sysmsg->ptregs.fs;
-  csgsfs.gs = sysmsg->ptregs.gs;
+  csgsfs.cs = ptregs->cs;
+  csgsfs.ss = ptregs->ss;
+  csgsfs.fs = ptregs->fs;
+  csgsfs.gs = ptregs->gs;
 
   ucontext->uc_mcontext.gregs[REG_CSGSFS] = csgsfs.csgsfs;
 }
 
 // get_fsbase writes the current thread's fsbase value to ptregs.
-static void get_fsbase(struct user_regs_struct *ptregs) {
+static uint64_t get_fsbase(void) {
   uint64_t fsbase;
   if (__export_arch_state.fsgsbase) {
     asm volatile("rdfsbase %0" : "=r"(fsbase));
@@ -132,12 +140,11 @@ static void get_fsbase(struct user_regs_struct *ptregs) {
       panic(ret);
     }
   }
-  ptregs->fs_base = fsbase;
+  return fsbase;
 }
 
 // set_fsbase sets the current thread's fsbase to the fsbase value in ptregs.
-static void set_fsbase(struct user_regs_struct *ptregs) {
-  uint64_t fsbase = ptregs->fs_base;
+static void set_fsbase(uint64_t fsbase) {
   if (__export_arch_state.fsgsbase) {
     asm volatile("wrfsbase %0" : : "r"(fsbase) : "memory");
   } else {
@@ -148,30 +155,66 @@ static void set_fsbase(struct user_regs_struct *ptregs) {
   }
 }
 
+// switch_context_amd64 is a wrapper of switch_context() which does checks
+// specific to amd64.
+struct thread_context *switch_context_amd64(
+    struct sysmsg *sysmsg, struct thread_context *ctx,
+    enum thread_state new_thread_state, enum context_state new_context_state) {
+  struct thread_context *old_ctx = sysmsg->context;
+
+  for (;;) {
+    // TODO(b/271631387): Once stub code globals can be used between objects
+    // move this check into sysmsg_lib:switch_context().
+    if (__export_context_decoupling_exp) {
+      ctx = switch_context(sysmsg, ctx, new_context_state);
+    } else {
+      ctx->state = new_context_state;
+      wait_state(sysmsg, new_thread_state);
+    }
+
+    // After setting THREAD_STATE_NONE, syshandled can be interrupted by
+    // SIGCHLD. In this case, we consider that the current context contains
+    // the actual state and sighandler can take control on it.
+    __atomic_store_n(&sysmsg->state, THREAD_STATE_NONE, __ATOMIC_RELEASE);
+    if (__atomic_load_n(&ctx->interrupt, __ATOMIC_ACQUIRE) != 0) {
+      __atomic_store_n(&sysmsg->state, THREAD_STATE_PREP, __ATOMIC_RELEASE);
+      // This context got interrupted while it was waiting in the queue.
+      // Setup all the necessary bits to let the sentry know this context has
+      // switched back because of it.
+      __atomic_store_n(&ctx->interrupt, 0, __ATOMIC_RELEASE);
+      new_context_state = CONTEXT_STATE_FAULT;
+      ctx->signo = SIGCHLD;
+      ctx->siginfo.si_signo = SIGCHLD;
+      ctx->ptregs.orig_rax = -1;
+    } else {
+      break;
+    }
+  }
+  if (old_ctx != ctx || ctx->last_thread_id != sysmsg->thread_id) {
+    ctx->fpstate_changed = 1;
+  }
+  return ctx;
+}
+
 void __export_sighandler(int signo, siginfo_t *siginfo, void *_ucontext) {
   ucontext_t *ucontext = _ucontext;
   void *sp = sysmsg_sp();
   struct sysmsg *sysmsg = sysmsg_addr(sp);
 
   if (sysmsg != sysmsg->self) panic(0xdeaddead);
+  int32_t thread_state = __atomic_load_n(&sysmsg->state, __ATOMIC_ACQUIRE);
+  if (__export_context_decoupling_exp &&
+      thread_state == THREAD_STATE_INITIALIZING) {
+    // This thread was interrupted before it even had a context.
+    return;
+  }
 
-  if (signo == SIGCHLD) {
-    // If the current thread is in syshandler, an interrupt has to be postponed,
-    // because sysmsg can't be changed.
-    int32_t state;
-    state = __atomic_load_n(&sysmsg->state, __ATOMIC_ACQUIRE);
-    if ((state != SYSMSG_STATE_NONE) ||
-        (ucontext->uc_mcontext.gregs[REG_RSP] > (unsigned long)sp)) {
-      __atomic_store_n(&sysmsg->interrupt, 1, __ATOMIC_RELEASE);
-      return;
-    }
-  } else if (signo == SIGILL && sysmsg->type == SYSMSG_INTERRUPT) {
-    // This is a postponed SignalInterrupt from syshandler.
-    signo = SIGCHLD;
-    siginfo->si_signo = SIGCHLD;
-    __atomic_store_n(&sysmsg->interrupt, 0, __ATOMIC_RELAXED);
-    // Skip the fault instruction.
-    ucontext->uc_mcontext.gregs[REG_RIP] = sysmsg->ret_addr;
+  struct thread_context *ctx = sysmsg->context;
+
+  // If the current thread is in syshandler, an interrupt has to be postponed,
+  // because sysmsg can't be changed.
+  if (signo == SIGCHLD && thread_state != THREAD_STATE_NONE) {
+    return;
   }
 
   // Handle faults in syshandler.
@@ -181,28 +224,39 @@ void __export_sighandler(int signo, siginfo_t *siginfo, void *_ucontext) {
     return;
   }
 
-  sysmsg->signo = signo;
-  gregs_to_ptregs(ucontext, sysmsg);
-  sysmsg->fpstate =
-      (unsigned long)ucontext->uc_mcontext.fpregs - (unsigned long)sysmsg;
-  sysmsg->siginfo = *siginfo;
+  long fs_base = get_fsbase();
+
+  ctx->signo = signo;
+  ctx->siginfo = *siginfo;
+  // syshandler sets THREAD_STATE_NONE right before it starts resuming a
+  // context. It means the context contains the actual state, and the state of
+  // the stub thread is incomplete.
+  if (signo != SIGCHLD ||
+      ucontext->uc_mcontext.gregs[REG_RIP] < __export_stub_start) {
+    ctx->ptregs.fs_base = fs_base;
+    gregs_to_ptregs(ucontext, &ctx->ptregs);
+    if (__export_context_decoupling_exp) {
+      memcpy(ctx->fpstate, (uint8_t *)ucontext->uc_mcontext.fpregs,
+             __export_arch_state.fp_len);
+    } else {
+      sysmsg->fpstate =
+          (unsigned long)ucontext->uc_mcontext.fpregs - (unsigned long)sysmsg;
+    }
+    __atomic_store_n(&ctx->fpstate_changed, 0, __ATOMIC_RELEASE);
+  }
+
+  enum context_state ctx_state = CONTEXT_STATE_INVALID;
+
   switch (signo) {
     case SIGSYS: {
-      int si_sysno = siginfo->si_syscall;
-      int i;
-      sysmsg->type = SYSMSG_SYSCALL;
+      ctx_state = CONTEXT_STATE_SYSCALL;
 
       // Check whether this syscall can be replaced on a function call or not.
       // If a syscall instruction set is "mov sysno, %eax, syscall", it can be
       // replaced on a function call which works much faster.
       // Look at pkg/sentry/usertrap for more details.
-      //
-      // Exclude all syscalls which requires a full thread state to be handled.
-      if (siginfo->si_arch == AUDIT_ARCH_X86_64 && si_sysno != __NR_execveat &&
-          si_sysno != __NR_execve && si_sysno != __NR_fork &&
-          si_sysno != __NR_clone && si_sysno != __NR_vfork &&
-          si_sysno != __NR_rt_sigreturn && si_sysno != __NR_arch_prctl) {
-        uint8_t *rip = (uint8_t *)sysmsg->ptregs.rip;
+      if (siginfo->si_arch == AUDIT_ARCH_X86_64) {
+        uint8_t *rip = (uint8_t *)ctx->ptregs.rip;
         // FIXME(b/144063246): Even if all five bytes before the syscall
         // instruction match the "mov sysno, %eax" instruction, they can be a
         // part of a longer instruction. Here is not easy way to decode x86
@@ -230,7 +284,7 @@ void __export_sighandler(int signo, siginfo_t *siginfo, void *_ucontext) {
                         *(syscall_code + 7) == 0x05 &&
                         *(syscall_code + 1) == 0xb8 &&  // mov sysno, %eax
                         sysno == siginfo->si_syscall &&
-                        sysno == sysmsg->ptregs.rax;
+                        sysno == ctx->ptregs.rax;
 
         // Restart syscall if it has been patched by another thread.  When a
         // syscall instruction set is replaced on a function call, all threads
@@ -250,15 +304,15 @@ void __export_sighandler(int signo, siginfo_t *siginfo, void *_ucontext) {
 
         if (need_trap) {
           // This syscall can be replaced on the function call.
-          sysmsg->type = SYSMSG_SYSCALL_NEED_TRAP;
+          ctx_state = CONTEXT_STATE_SYSCALL_NEED_TRAP;
         }
       }
-      sysmsg->ptregs.orig_rax = sysmsg->ptregs.rax;
-      sysmsg->ptregs.rax = (unsigned long)-ENOSYS;
+      ctx->ptregs.orig_rax = ctx->ptregs.rax;
+      ctx->ptregs.rax = (unsigned long)-ENOSYS;
       if (siginfo->si_arch != AUDIT_ARCH_X86_64)
         // gVisor doesn't support x32 system calls, so let's change the syscall
         // number so that it returns ENOSYS.
-        sysmsg->ptregs.orig_rax += 0x86000000;
+        ctx->ptregs.orig_rax += 0x86000000;
       break;
     }
     case SIGCHLD:
@@ -267,78 +321,135 @@ void __export_sighandler(int signo, siginfo_t *siginfo, void *_ucontext) {
     case SIGFPE:
     case SIGTRAP:
     case SIGILL:
-      sysmsg->ptregs.orig_rax = -1;
-      sysmsg->type = SYSMSG_FAULT;
+      ctx->ptregs.orig_rax = -1;
+      ctx_state = CONTEXT_STATE_FAULT;
       break;
     default:
       return;
   }
-  get_fsbase(&sysmsg->ptregs);
-  long fs_base = sysmsg->ptregs.fs_base;
 
-  wait_state(sysmsg, SYSMSG_STATE_EVENT);
-
-  if (fs_base != sysmsg->ptregs.fs_base) {
-    set_fsbase(&sysmsg->ptregs);
+  ctx = switch_context_amd64(sysmsg, ctx, THREAD_STATE_EVENT, ctx_state);
+  if (fs_base != ctx->ptregs.fs_base) {
+    set_fsbase(ctx->ptregs.fs_base);
   }
-  ptregs_to_gregs(ucontext, sysmsg);
-  __atomic_store_n(&sysmsg->state, SYSMSG_STATE_NONE, __ATOMIC_RELEASE);
+
+  if (__export_context_decoupling_exp &&
+      __atomic_load_n(&ctx->fpstate_changed, __ATOMIC_ACQUIRE)) {
+    memcpy((uint8_t *)ucontext->uc_mcontext.fpregs, ctx->fpstate,
+           __export_arch_state.fp_len);
+  }
+  ptregs_to_gregs(ucontext, &ctx->ptregs);
 }
 
-// Function arguments: %rdi,%rsi, %rdx, %rcx, %r8 and %r9.
-// http://refspecs.linuxfoundation.org/elf/x86_64-abi-0.99.pdf
-long __syshandler(long a1, long a2, long a3, long __unused, long a5, long a6) {
-  long sysno, a4, rip;
+void __syshandler() {
   struct sysmsg *sysmsg;
-  asm volatile(
-      "movq %%rax, %0\n"
-      "movq %%r10, %1\n"
-      : "=m"(sysno), "=m"(a4)
-      :
-      :);
   asm volatile("movq %%gs:0, %0\n" : "=r"(sysmsg) : :);
-
-  BUILD_BUG_ON(offsetof_sysmsg_self != offsetof(struct sysmsg, self));
-  BUILD_BUG_ON(offsetof_sysmsg_ret_addr != offsetof(struct sysmsg, ret_addr));
-  BUILD_BUG_ON(offsetof_sysmsg_syshandler !=
-               offsetof(struct sysmsg, syshandler));
-  BUILD_BUG_ON(offsetof_sysmsg_syshandler_stack !=
-               offsetof(struct sysmsg, syshandler_stack));
-  BUILD_BUG_ON(offsetof_sysmsg_app_stack != offsetof(struct sysmsg, app_stack));
-  BUILD_BUG_ON(offsetof_sysmsg_interrupt != offsetof(struct sysmsg, interrupt));
-  BUILD_BUG_ON(offsetof_sysmsg_type != offsetof(struct sysmsg, type));
-  BUILD_BUG_ON(offsetof_sysmsg_state != offsetof(struct sysmsg, state));
-  BUILD_BUG_ON(kSYSMSG_SYSCALL != SYSMSG_SYSCALL);
-  BUILD_BUG_ON(kSYSMSG_INTERRUPT != SYSMSG_INTERRUPT);
-
   // SYSMSG_STATE_PREP is set to postpone interrupts. Look at
   // __export_sighandler for more details.
   int state = __atomic_load_n(&sysmsg->state, __ATOMIC_ACQUIRE);
-  if (state != SYSMSG_STATE_PREP) panic(state);
-  sysmsg->signo = SIGSYS;
-  sysmsg->ptregs.rax = sysno;
-  sysmsg->ptregs.rdi = a1;
-  sysmsg->ptregs.rsi = a2;
-  sysmsg->ptregs.rdx = a3;
-  sysmsg->ptregs.r10 = a4;
-  sysmsg->ptregs.r8 = a5;
-  sysmsg->ptregs.r9 = a6;
-  sysmsg->ptregs.rsp = sysmsg->app_stack;
-  sysmsg->ptregs.rip = sysmsg->ret_addr;
-  sysmsg->type = SYSMSG_SYSCALL_TRAP;
-  sysmsg->ptregs.orig_rax = sysmsg->ptregs.rax;
-  sysmsg->ptregs.rax = (unsigned long)-ENOSYS;
-  sysmsg->siginfo.si_addr = 0;
-  sysmsg->siginfo.si_syscall = sysno;
-  __atomic_store_n(&sysmsg->interrupt, 0, __ATOMIC_RELAXED);
+  if (state != THREAD_STATE_PREP) panic(state);
 
-  state = wait_state(sysmsg, SYSMSG_STATE_EVENT);
-  long sysret = sysmsg->ptregs.rax;
-  if (state == SYSMSG_STATE_SIGACT) {
-    sysmsg->type = SYSMSG_SYSCALL;
-    return -1;
+  struct thread_context *ctx = sysmsg->context;
+
+  enum context_state ctx_state = CONTEXT_STATE_SYSCALL_TRAP;
+  ctx->signo = SIGSYS;
+  ctx->siginfo.si_addr = 0;
+  ctx->siginfo.si_syscall = ctx->ptregs.rax;
+  ctx->ptregs.rax = (unsigned long)-ENOSYS;
+
+  long fs_base = get_fsbase();
+  ctx->ptregs.fs_base = fs_base;
+
+  ctx = switch_context_amd64(sysmsg, ctx, THREAD_STATE_EVENT, ctx_state);
+  // switch_context_amd64 changed sysmsg->state to THREAD_STATE_NONE, so we can
+  // only resume the current process, all other actions are
+  // prohibited after this point.
+
+  if (fs_base != ctx->ptregs.fs_base) {
+    set_fsbase(ctx->ptregs.fs_base);
   }
+}
 
-  __atomic_store_n(&sysmsg->state, SYSMSG_STATE_NONE, __ATOMIC_RELEASE);
-  return sysret;
+void __export_start(struct sysmsg *sysmsg, void *_ucontext) {
+#if defined(__x86_64__)
+  asm volatile("movq %%gs:0, %0\n" : "=r"(sysmsg) : :);
+  if (sysmsg->self != sysmsg) {
+    panic(0xdeaddead);
+  }
+#endif
+
+  struct thread_context *ctx = switch_context_amd64(
+      sysmsg, NULL, THREAD_STATE_EVENT, CONTEXT_STATE_INVALID);
+
+  restore_state(sysmsg, ctx, _ucontext);
+}
+
+// asm_restore_state is implemented in syshandler_amd64.S
+void asm_restore_state();
+
+// On x86 restore_state jumps straight to user code and does not return.
+void restore_state(struct sysmsg *sysmsg, struct thread_context *ctx,
+                   void *unused) {
+  set_fsbase(ctx->ptregs.fs_base);
+  asm_restore_state();
+}
+
+void verify_offsets_amd64() {
+#define PTREGS_OFFSET offsetof(struct thread_context, ptregs)
+  BUILD_BUG_ON(offsetof_thread_context_ptregs != PTREGS_OFFSET);
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_r15 !=
+               (offsetof(struct user_regs_struct, r15) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_r14 !=
+               (offsetof(struct user_regs_struct, r14) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_r13 !=
+               (offsetof(struct user_regs_struct, r13) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_r12 !=
+               (offsetof(struct user_regs_struct, r12) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_rbp !=
+               (offsetof(struct user_regs_struct, rbp) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_rbx !=
+               (offsetof(struct user_regs_struct, rbx) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_r11 !=
+               (offsetof(struct user_regs_struct, r11) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_r10 !=
+               (offsetof(struct user_regs_struct, r10) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_r9 !=
+               (offsetof(struct user_regs_struct, r9) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_r8 !=
+               (offsetof(struct user_regs_struct, r8) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_rax !=
+               (offsetof(struct user_regs_struct, rax) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_rcx !=
+               (offsetof(struct user_regs_struct, rcx) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_rdx !=
+               (offsetof(struct user_regs_struct, rdx) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_rsi !=
+               (offsetof(struct user_regs_struct, rsi) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_rdi !=
+               (offsetof(struct user_regs_struct, rdi) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_orig_rax !=
+               (offsetof(struct user_regs_struct, orig_rax) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_rip !=
+               (offsetof(struct user_regs_struct, rip) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_cs !=
+               (offsetof(struct user_regs_struct, cs) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_eflags !=
+               (offsetof(struct user_regs_struct, eflags) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_rsp !=
+               (offsetof(struct user_regs_struct, rsp) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_ss !=
+               (offsetof(struct user_regs_struct, ss) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_fs_base !=
+               (offsetof(struct user_regs_struct, fs_base) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_gs_base !=
+               (offsetof(struct user_regs_struct, gs_base) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_ds !=
+               (offsetof(struct user_regs_struct, ds) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_es !=
+               (offsetof(struct user_regs_struct, es) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_fs !=
+               (offsetof(struct user_regs_struct, fs) + PTREGS_OFFSET));
+  BUILD_BUG_ON(offsetof_thread_context_ptregs_gs !=
+               (offsetof(struct user_regs_struct, gs) + PTREGS_OFFSET));
+#undef PTREGS_OFFSET
 }

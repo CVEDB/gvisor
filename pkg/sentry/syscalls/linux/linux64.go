@@ -235,7 +235,7 @@ var AMD64 = &kernel.SyscallTable{
 		180: syscalls.Error("nfsservctl", linuxerr.ENOSYS, "Removed after Linux 3.1.", nil),
 		181: syscalls.Error("getpmsg", linuxerr.ENOSYS, "Not implemented in Linux.", nil),
 		182: syscalls.Error("putpmsg", linuxerr.ENOSYS, "Not implemented in Linux.", nil),
-		183: syscalls.Error("afs_syscall", linuxerr.ENOSYS, "Not implemented in Linux.", nil),
+		183: syscalls.PartiallySupported("afs_syscall", AFSSyscall, "Test implementation.", nil),
 		184: syscalls.Error("tuxcall", linuxerr.ENOSYS, "Not implemented in Linux.", nil),
 		185: syscalls.Error("security", linuxerr.ENOSYS, "Not implemented in Linux.", nil),
 		186: syscalls.Supported("gettid", Gettid),
@@ -414,7 +414,7 @@ var AMD64 = &kernel.SyscallTable{
 		0xffffffffff600800: 309, // vsyscall getcpu(2)
 	},
 	Missing: func(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, error) {
-		t.Kernel().EmitUnimplementedEvent(t)
+		t.Kernel().EmitUnimplementedEvent(t, sysno)
 		return 0, linuxerr.ENOSYS
 	},
 }
@@ -731,7 +731,7 @@ var ARM64 = &kernel.SyscallTable{
 	},
 	Emulate: map[hostarch.Addr]uintptr{},
 	Missing: func(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, error) {
-		t.Kernel().EmitUnimplementedEvent(t)
+		t.Kernel().EmitUnimplementedEvent(t, sysno)
 		return 0, linuxerr.ENOSYS
 	},
 }

@@ -20,12 +20,14 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/cleanup"
 	"gvisor.dev/gvisor/pkg/test/testutil"
 	"gvisor.dev/gvisor/runsc/config"
@@ -43,13 +45,22 @@ const (
 
 // metricsTest is returned by setupMetrics.
 type metricsTest struct {
-	testCtx   context.Context
-	rootDir   string
-	bundleDir string
-	sleepSpec *specs.Spec
-	sleepConf *config.Config
-	udsPath   string
-	client    *metricclient.MetricClient
+	testCtx         context.Context
+	rootDir         string
+	bundleDir       string
+	sleepSpec       *specs.Spec
+	sleepConf       *config.Config
+	udsPath         string
+	client          *metricclient.MetricClient
+	serverExtraArgs []string
+}
+
+// applyConf applies metric-server-related configuration options to the given config.
+// Returns the passed-in config itself.
+func (mt *metricsTest) applyConf(conf *config.Config) *config.Config {
+	conf.MetricServer = mt.sleepConf.MetricServer
+	conf.RootDir = mt.rootDir
+	return conf
 }
 
 // setupMetrics sets up a container configuration with metrics enabled, and returns it all.
@@ -67,7 +78,7 @@ func setupMetrics(t *testing.T, forceTempUDS bool) (*metricsTest, func()) {
 
 	spec, conf := sleepSpecConf(t)
 	conf.MetricServer = "%RUNTIME_ROOT%/metrics.sock"
-	conf.MetricExporterPrefix = "testmetric_"
+	serverExtraArgs := []string{"--exporter-prefix=testmetric_"}
 	rootDir, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
 	if err != nil {
 		t.Fatalf("error setting up container: %v", err)
@@ -90,19 +101,20 @@ func setupMetrics(t *testing.T, forceTempUDS bool) (*metricsTest, func()) {
 	cu.Add(func() { os.Remove(udsPath) })
 
 	metricClient := metricclient.NewMetricClient(udsPath, rootDir)
-	if err := metricClient.SpawnServer(testCtx, conf); err != nil {
+	if err := metricClient.SpawnServer(testCtx, conf, serverExtraArgs...); err != nil {
 		t.Fatalf("Cannot start metric server: %v", err)
 	}
 	cu.Add(func() { metricClient.ShutdownServer(cleanupCtx) })
 
 	return &metricsTest{
-		testCtx:   testCtx,
-		rootDir:   rootDir,
-		bundleDir: bundleDir,
-		sleepSpec: spec,
-		sleepConf: conf,
-		udsPath:   udsPath,
-		client:    metricClient,
+		testCtx:         testCtx,
+		rootDir:         rootDir,
+		bundleDir:       bundleDir,
+		sleepSpec:       spec,
+		sleepConf:       conf,
+		udsPath:         udsPath,
+		client:          metricClient,
+		serverExtraArgs: serverExtraArgs,
 	}, cu.Clean
 }
 
@@ -113,7 +125,7 @@ func TestContainerMetrics(t *testing.T) {
 	te, cleanup := setupMetrics(t /* forceTempUDS= */, false)
 	defer cleanup()
 
-	if _, err := te.client.GetMetrics(te.testCtx); err != nil {
+	if _, err := te.client.GetMetrics(te.testCtx, nil); err != nil {
 		t.Fatal("GetMetrics failed prior to container start")
 	}
 	if te.sleepSpec.Annotations == nil {
@@ -138,11 +150,11 @@ func TestContainerMetrics(t *testing.T) {
 	if udsStat.Mode()&os.ModeSocket == 0 {
 		t.Errorf("Stat(%s): Got mode %x, expected socket (mode %x)", te.udsPath, udsStat.Mode(), os.ModeSocket)
 	}
-	initialData, err := te.client.GetMetrics(te.testCtx)
+	initialData, err := te.client.GetMetrics(te.testCtx, nil)
 	if err != nil {
 		t.Errorf("Cannot get metrics after creating container: %v", err)
 	}
-	gotMetadata, err := initialData.GetSandboxMetadataMetric(metricclient.WantMetric{
+	gotSandboxMetadata, err := initialData.GetSandboxMetadataMetric(metricclient.WantMetric{
 		Metric:    "testmetric_meta_sandbox_metadata",
 		Sandbox:   args.ID,
 		Pod:       "foopod",
@@ -151,14 +163,26 @@ func TestContainerMetrics(t *testing.T) {
 	if err != nil {
 		t.Errorf("Cannot get sandbox metadata: %v", err)
 	}
-	if gotMetadata["platform"] == "" || gotMetadata["platform"] != te.sleepConf.Platform {
-		t.Errorf("Invalid platform: Metric metadata says %v, config says %v", gotMetadata["platform"], te.sleepConf.Platform)
+	if gotSandboxMetadata["platform"] == "" || gotSandboxMetadata["platform"] != te.sleepConf.Platform {
+		t.Errorf("Invalid platform: Metric metadata says %v, config says %v", gotSandboxMetadata["platform"], te.sleepConf.Platform)
+	}
+	gotSpecMetadata, err := initialData.GetSandboxMetadataMetric(metricclient.WantMetric{
+		Metric:    "testmetric_meta_spec_metadata",
+		Sandbox:   args.ID,
+		Pod:       "foopod",
+		Namespace: "foons",
+	})
+	if err != nil {
+		t.Errorf("Cannot get spec metadata: %v", err)
+	}
+	if gotSpecMetadata["hasuid0"] == "" || (gotSpecMetadata["hasuid0"] != "true" && gotSpecMetadata["hasuid0"] != "false") {
+		t.Errorf("Invalid or absent hasuid0 key from spec metadata: %v", gotSpecMetadata["hasuid0"])
 	}
 	t.Logf("Metrics prior to container start:\n\n%s\n\n", initialData)
 	if err := cont.Start(te.sleepConf); err != nil {
 		t.Fatalf("Cannot start container: %v", err)
 	}
-	postStartData, err := te.client.GetMetrics(te.testCtx)
+	postStartData, err := te.client.GetMetrics(te.testCtx, nil)
 	if err != nil {
 		t.Fatalf("Cannot get metrics after starting container: %v", err)
 	}
@@ -173,11 +197,11 @@ func TestContainerMetrics(t *testing.T) {
 	}
 	t.Logf("After container start, fs_opens=%d (snapshotted at %v)", postStartOpens, postStartTimestamp)
 	// The touch operation may fail from permission errors, but the metric should still be incremented.
-	shOutput, err := executeCombinedOutput(te.sleepConf, cont, "/bin/bash", "-c", fmt.Sprintf("for i in $(seq 1 %d); do touch /tmp/$i || true; done", targetOpens))
+	shOutput, err := executeCombinedOutput(te.sleepConf, cont, nil, "/bin/bash", "-c", fmt.Sprintf("for i in $(seq 1 %d); do touch /tmp/$i || true; done", targetOpens))
 	if err != nil {
 		t.Fatalf("Exec failed: %v; output: %v", err, shOutput)
 	}
-	postExecData, err := te.client.GetMetrics(te.testCtx)
+	postExecData, err := te.client.GetMetrics(te.testCtx, nil)
 	if err != nil {
 		t.Fatalf("Cannot get metrics after a bunch of open() calls: %v", err)
 	}
@@ -213,7 +237,7 @@ func TestContainerMetricsIterationID(t *testing.T) {
 		t.Fatalf("error creating container 1: %v", err)
 	}
 	defer cont1.Destroy()
-	data1, err := te.client.GetMetrics(te.testCtx)
+	data1, err := te.client.GetMetrics(te.testCtx, nil)
 	if err != nil {
 		t.Errorf("Cannot get metrics after creating container 1: %v", err)
 	}
@@ -237,7 +261,7 @@ func TestContainerMetricsIterationID(t *testing.T) {
 		t.Fatalf("error creating container 2: %v", err)
 	}
 	defer cont2.Destroy()
-	data2, err := te.client.GetMetrics(te.testCtx)
+	data2, err := te.client.GetMetrics(te.testCtx, nil)
 	if err != nil {
 		t.Errorf("Cannot get metrics after creating container 2: %v", err)
 	}
@@ -279,11 +303,11 @@ func TestContainerMetricsRobustAgainstRestarts(t *testing.T) {
 	if err := cont.Start(te.sleepConf); err != nil {
 		t.Fatalf("Cannot start container: %v", err)
 	}
-	shOutput, err := executeCombinedOutput(te.sleepConf, cont, "/bin/bash", "-c", fmt.Sprintf("for i in $(seq 1 %d); do touch /tmp/$i || true; done", targetOpens))
+	shOutput, err := executeCombinedOutput(te.sleepConf, cont, nil, "/bin/bash", "-c", fmt.Sprintf("for i in $(seq 1 %d); do touch /tmp/$i || true; done", targetOpens))
 	if err != nil {
 		t.Fatalf("Exec failed: %v; output: %v", err, shOutput)
 	}
-	preRestartData, err := te.client.GetMetrics(te.testCtx)
+	preRestartData, err := te.client.GetMetrics(te.testCtx, nil)
 	if err != nil {
 		t.Fatalf("Cannot get metrics after a bunch of open() calls: %v", err)
 	}
@@ -310,13 +334,13 @@ func TestContainerMetricsRobustAgainstRestarts(t *testing.T) {
 	if err := te.client.ShutdownServer(te.testCtx); err != nil {
 		t.Fatalf("Cannot shutdown server: %v", err)
 	}
-	if rawData, err := te.client.GetMetrics(te.testCtx); err == nil {
+	if rawData, err := te.client.GetMetrics(te.testCtx, nil); err == nil {
 		t.Fatalf("Unexpectedly was able to get metric data despite shutting down server:\n\n%s\n\n", rawData)
 	}
 
 	// Do a bunch of touches again. The metric server is down during this time.
 	// This verifies that metric value modifications does not depend on the metric server being up.
-	shOutput, err = executeCombinedOutput(te.sleepConf, cont, "/bin/bash", "-c", fmt.Sprintf("for i in $(seq 1 %d); do touch /tmp/$i || true; done", targetOpens))
+	shOutput, err = executeCombinedOutput(te.sleepConf, cont, nil, "/bin/bash", "-c", fmt.Sprintf("for i in $(seq 1 %d); do touch /tmp/$i || true; done", targetOpens))
 	if err != nil {
 		t.Fatalf("Exec failed: %v; output: %v", err, shOutput)
 	}
@@ -334,18 +358,18 @@ func TestContainerMetricsRobustAgainstRestarts(t *testing.T) {
 		t.Fatalf("error creating second container: %v", err)
 	}
 	defer cont2.Destroy()
-	if rawData, err := te.client.GetMetrics(te.testCtx); err == nil {
+	if rawData, err := te.client.GetMetrics(te.testCtx, nil); err == nil {
 		t.Fatalf("Unexpectedly was able to get metric data after creating second container:\n\n%s\n\n", rawData)
 	}
 	if err := cont2.Start(te.sleepConf); err != nil {
 		t.Fatalf("Cannot start second container: %v", err)
 	}
-	if rawData, err := te.client.GetMetrics(te.testCtx); err == nil {
+	if rawData, err := te.client.GetMetrics(te.testCtx, nil); err == nil {
 		t.Fatalf("Unexpectedly was able to get metric data after starting second container:\n\n%s\n\n", rawData)
 	}
 
 	// Start the metric server.
-	if err := te.client.SpawnServer(te.testCtx, te.sleepConf); err != nil {
+	if err := te.client.SpawnServer(te.testCtx, te.sleepConf, te.serverExtraArgs...); err != nil {
 		t.Fatalf("Cannot re-spawn server: %v", err)
 	}
 
@@ -367,7 +391,7 @@ func TestContainerMetricsRobustAgainstRestarts(t *testing.T) {
 
 	// Verify that the metric server was restarted and that we can indeed get all the data we expect
 	// from all the containers this test has started.
-	postRestartData, err := te.client.GetMetrics(te.testCtx)
+	postRestartData, err := te.client.GetMetrics(te.testCtx, nil)
 	if err != nil {
 		t.Fatalf("Cannot get metrics after restarting server: %v", err)
 	}
@@ -459,7 +483,7 @@ func TestContainerMetricsMultiple(t *testing.T) {
 	defer noMetricsCont.Destroy()
 
 	// Verify that the metrics server says what we expect.
-	gotData, err := te.client.GetMetrics(te.testCtx)
+	gotData, err := te.client.GetMetrics(te.testCtx, nil)
 	if err != nil {
 		t.Fatalf("Cannot get metrics after starting containers: %v", err)
 	}
@@ -489,7 +513,7 @@ func TestContainerMetricsMultiple(t *testing.T) {
 	}
 
 	// Verify that now we only have half the containers.
-	gotData, err = te.client.GetMetrics(te.testCtx)
+	gotData, err = te.client.GetMetrics(te.testCtx, nil)
 	if err != nil {
 		t.Fatalf("Cannot get metrics after stopping half the containers: %v", err)
 	}
@@ -514,6 +538,225 @@ func TestContainerMetricsMultiple(t *testing.T) {
 	}
 }
 
+// TestContainerMetricsFilter verifies the ability to filter metrics in /metrics requests.
+func TestContainerMetricsFilter(t *testing.T) {
+	te, cleanup := setupMetrics(t, false /* forceTempUDS */)
+	defer cleanup()
+
+	args := Args{
+		ID:        testutil.RandomContainerID(),
+		Spec:      te.sleepSpec,
+		BundleDir: te.bundleDir,
+	}
+	cont, err := New(te.sleepConf, args)
+	if err != nil {
+		t.Fatalf("error creating container: %v", err)
+	}
+	defer cont.Destroy()
+	if err := cont.Start(te.sleepConf); err != nil {
+		t.Fatalf("Cannot start container: %v", err)
+	}
+
+	// First pass: Unfiltered data.
+	unfilteredData, err := te.client.GetMetrics(te.testCtx, nil)
+	if err != nil {
+		t.Fatalf("Cannot get metrics: %v", err)
+	}
+	_, _, err = unfilteredData.GetPrometheusContainerInteger(metricclient.WantMetric{
+		Metric:  "testmetric_fs_opens",
+		Sandbox: args.ID,
+	})
+	if err != nil {
+		t.Errorf("Cannot get testmetric_fs_opens: %v", err)
+	}
+	_, err = unfilteredData.GetSandboxMetadataMetric(metricclient.WantMetric{
+		Metric:  "testmetric_meta_sandbox_metadata",
+		Sandbox: args.ID,
+	})
+	if err != nil {
+		t.Errorf("Cannot get sandbox metadata: %v", err)
+	}
+
+	// Second pass: Filter such that fs_opens does not match.
+	filteredData, err := te.client.GetMetrics(te.testCtx, map[string]string{
+		"runsc-sandbox-metrics-filter": "^$", // Matches nothing.
+	})
+	if err != nil {
+		t.Fatalf("Cannot get metrics: %v", err)
+	}
+	_, _, err = filteredData.GetPrometheusContainerInteger(metricclient.WantMetric{
+		Metric:  "testmetric_fs_opens",
+		Sandbox: args.ID,
+	})
+	if err == nil {
+		t.Errorf("Was unexpectedly able to get fs_opens data from filtered data:\n\n%v\n\n", filteredData)
+	}
+	_, err = filteredData.GetSandboxMetadataMetric(metricclient.WantMetric{
+		Metric:  "testmetric_meta_sandbox_metadata",
+		Sandbox: args.ID,
+	})
+	if err != nil {
+		t.Errorf("Cannot get sandbox metadata from filtered data: %v", err)
+	}
+
+	// Third pass: Filter such that fs_opens does match.
+	filteredData2, err := te.client.GetMetrics(te.testCtx, map[string]string{
+		"runsc-sandbox-metrics-filter": "^fs_.*$",
+	})
+	if err != nil {
+		t.Fatalf("Cannot get metrics: %v", err)
+	}
+	_, _, err = filteredData2.GetPrometheusContainerInteger(metricclient.WantMetric{
+		Metric:  "testmetric_fs_opens",
+		Sandbox: args.ID,
+	})
+	if err != nil {
+		t.Errorf("Cannot get testmetric_fs_opens from filtered data: %v", err)
+	}
+	_, err = filteredData2.GetSandboxMetadataMetric(metricclient.WantMetric{
+		Metric:  "testmetric_meta_sandbox_metadata",
+		Sandbox: args.ID,
+	})
+	if err != nil {
+		t.Errorf("Cannot get sandbox metadata from filtered data: %v", err)
+	}
+
+	// Fourth pass: Filter such that fs_opens does not match, then request with no filtering,
+	// to ensure that the filter regex caching is correctly applied.
+	_, err = te.client.GetMetrics(te.testCtx, map[string]string{
+		"runsc-sandbox-metrics-filter": "^$",
+	})
+	if err != nil {
+		t.Fatalf("Cannot get metrics: %v", err)
+	}
+	unfilteredData2, err := te.client.GetMetrics(te.testCtx, nil)
+	if err != nil {
+		t.Fatalf("Cannot get metrics: %v", err)
+	}
+	_, _, err = unfilteredData2.GetPrometheusContainerInteger(metricclient.WantMetric{
+		Metric:  "testmetric_fs_opens",
+		Sandbox: args.ID,
+	})
+	if err != nil {
+		t.Errorf("Cannot get testmetric_fs_opens from unfiltered data: %v", err)
+	}
+	_, err = unfilteredData2.GetSandboxMetadataMetric(metricclient.WantMetric{
+		Metric:  "testmetric_meta_sandbox_metadata",
+		Sandbox: args.ID,
+	})
+	if err != nil {
+		t.Errorf("Cannot get sandbox metadata from unfiltered data: %v", err)
+	}
+
+	// Fifth pass: Use alternate URL encoding to mimic Prometheus's URL-encoding
+	// behavior.
+	alternatePathData, err := te.client.GetMetrics(te.testCtx, map[string]string{
+		// Encoded version of "/metrics?runsc-sandbox-metrics-filter=^$", this should match nothing.
+		"": "/metrics%3Frunsc-sandbox-metrics-filter=%5E%24",
+	})
+	if err != nil {
+		t.Fatalf("Cannot get metrics: %v", err)
+	}
+	_, err = alternatePathData.GetSandboxMetadataMetric(metricclient.WantMetric{
+		Metric:  "testmetric_meta_sandbox_metadata",
+		Sandbox: args.ID,
+	})
+	if err != nil {
+		t.Errorf("Cannot get sandbox metadata from data obtained from alternate path: %v\n\nData:\n\n%v\n\n", err, alternatePathData)
+	}
+	_, _, err = alternatePathData.GetPrometheusContainerInteger(metricclient.WantMetric{
+		Metric:  "testmetric_fs_opens",
+		Sandbox: args.ID,
+	})
+	if err == nil {
+		t.Errorf("Was unexpectedly able to get testmetric_fs_opens from data obtained from alternate path which was supposed to filter it out:\n\n%v\n\n", alternatePathData)
+	}
+}
+
+// TestContainerCapabilityFilter verifies the ability to filter capabilities in /metrics requests.
+func TestContainerCapabilityFilter(t *testing.T) {
+	te, cleanup := setupMetrics(t, false /* forceTempUDS */)
+	defer cleanup()
+	te.sleepSpec.Process.Capabilities.Bounding = append(
+		te.sleepSpec.Process.Capabilities.Bounding,
+		linux.CAP_SYS_NICE.String(),
+		linux.CAP_NET_RAW.String())
+
+	args := Args{
+		ID:        testutil.RandomContainerID(),
+		Spec:      te.sleepSpec,
+		BundleDir: te.bundleDir,
+	}
+	cont, err := New(te.sleepConf, args)
+	if err != nil {
+		t.Fatalf("error creating container: %v", err)
+	}
+	defer cont.Destroy()
+	if err := cont.Start(te.sleepConf); err != nil {
+		t.Fatalf("Cannot start container: %v", err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		filter string
+		want   map[linux.Capability]bool
+	}{
+		{
+			name:   "unfiltered",
+			filter: "",
+			want:   map[linux.Capability]bool{linux.CAP_SYS_NICE: true, linux.CAP_NET_RAW: true},
+		},
+		{
+			name:   "all filtered out",
+			filter: "^$",
+			want:   map[linux.Capability]bool{linux.CAP_SYS_NICE: false, linux.CAP_NET_RAW: false},
+		},
+		{
+			name:   "simple filter with prefix",
+			filter: fmt.Sprintf("^%s$", linux.CAP_SYS_NICE.String()),
+			want:   map[linux.Capability]bool{linux.CAP_SYS_NICE: true, linux.CAP_NET_RAW: false},
+		},
+		{
+			name:   "simple filter without prefix",
+			filter: fmt.Sprintf("^%s$", linux.CAP_SYS_NICE.TrimmedString()),
+			want:   map[linux.Capability]bool{linux.CAP_SYS_NICE: true, linux.CAP_NET_RAW: false},
+		},
+		{
+			name:   "unfiltered again to test regexp caching",
+			filter: "",
+			want:   map[linux.Capability]bool{linux.CAP_SYS_NICE: true, linux.CAP_NET_RAW: true},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var params map[string]string
+			if test.filter != "" {
+				params = map[string]string{
+					"runsc-capability-filter": test.filter,
+				}
+			}
+			data, err := te.client.GetMetrics(te.testCtx, params)
+			if err != nil {
+				t.Fatalf("Cannot get metrics: %v", err)
+			}
+			for cap, want := range test.want {
+				got, _, err := data.GetPrometheusContainerInteger(metricclient.WantMetric{
+					Metric:      "testmetric_meta_sandbox_capabilities",
+					Sandbox:     args.ID,
+					ExtraLabels: map[string]string{"capability": cap.TrimmedString()},
+				})
+				if err != nil && want {
+					t.Errorf("Cannot get testmetric_meta_sandbox_capabilities[capability=%q]: %v", cap.TrimmedString(), err)
+				} else if err == nil && !want {
+					t.Errorf("Unexpectedly able to get testmetric_meta_sandbox_capabilities[capability=%q]: %v", cap.TrimmedString(), got)
+				}
+			}
+			if t.Failed() {
+				t.Logf("Metric data:\n\n%s\n\n", data)
+			}
+		})
+	}
+}
+
 func TestMetricServerChecksRootDirectoryAccess(t *testing.T) {
 	te, cleanup := setupMetrics(t /* forceTempUDS= */, false)
 	defer cleanup()
@@ -534,7 +777,7 @@ func TestMetricServerChecksRootDirectoryAccess(t *testing.T) {
 	}
 	shorterCtx, shorterCtxCancel := context.WithTimeout(te.testCtx, time.Second)
 	defer shorterCtxCancel()
-	if err := te.client.SpawnServer(shorterCtx, te.sleepConf); err == nil {
+	if err := te.client.SpawnServer(shorterCtx, te.sleepConf, te.serverExtraArgs...); err == nil {
 		t.Error("Metric server was successfully able to be spawned despite not having access to the root directory")
 	}
 }
@@ -548,14 +791,126 @@ func TestMetricServerToleratesNoRootDirectory(t *testing.T) {
 	if err := os.RemoveAll(te.sleepConf.RootDir); err != nil {
 		t.Fatalf("cannot remove root directory %q: %v", te.sleepConf.RootDir, err)
 	}
-	te.sleepConf.MetricServerAllowUnknownRoot = false
 	shortCtx, shortCtxCancel := context.WithTimeout(te.testCtx, time.Second)
 	defer shortCtxCancel()
-	if err := te.client.SpawnServer(shortCtx, te.sleepConf); err == nil {
+	if err := te.client.SpawnServer(shortCtx, te.sleepConf, append([]string{"--allow-unknown-root=false"}, te.serverExtraArgs...)...); err == nil {
 		t.Fatalf("Metric server was successfully able to be spawned despite a non-existent root directory")
 	}
-	te.sleepConf.MetricServerAllowUnknownRoot = true
-	if err := te.client.SpawnServer(te.testCtx, te.sleepConf); err != nil {
+	if err := te.client.SpawnServer(te.testCtx, te.sleepConf, append([]string{"--allow-unknown-root=true"}, te.serverExtraArgs...)...); err != nil {
 		t.Errorf("Metric server was not able to be spawned despite being configured to tolerate a non-existent root directory: %v", err)
+	}
+}
+
+func TestMetricServerDoesNotExportZeroValueCounters(t *testing.T) {
+	te, cleanup := setupMetrics(t, false /* forceTempUDS */)
+	defer cleanup()
+	app, err := testutil.FindFile("test/cmd/test_app/test_app")
+	if err != nil {
+		t.Fatalf("error finding test_app: %v", err)
+	}
+	unimpl1Spec := testutil.NewSpecWithArgs("sh", "-c", fmt.Sprintf("%s syscall --syscall=1337; sleep 1h", app))
+	unimpl1Conf := te.applyConf(testutil.TestConfig(t))
+	unimpl1Bundle, cleanup, err := testutil.SetupBundleDir(unimpl1Spec)
+	if err != nil {
+		t.Fatalf("error setting up container: %v", err)
+	}
+	defer cleanup()
+	unimpl2Spec := testutil.NewSpecWithArgs("sh", "-c", fmt.Sprintf("%s syscall --syscall=1338; sleep 1h", app))
+	unimpl2Conf := te.applyConf(testutil.TestConfig(t))
+	unimpl2Bundle, cleanup, err := testutil.SetupBundleDir(unimpl2Spec)
+	if err != nil {
+		t.Fatalf("error setting up container: %v", err)
+	}
+	defer cleanup()
+	unimpl1, err := New(unimpl1Conf, Args{
+		ID:        testutil.RandomContainerID(),
+		Spec:      unimpl1Spec,
+		BundleDir: unimpl1Bundle,
+	})
+	if err != nil {
+		t.Fatalf("error creating first container: %v", err)
+	}
+	defer unimpl1.Destroy()
+	if err := unimpl1.Start(unimpl1Conf); err != nil {
+		t.Fatalf("Cannot start first container: %v", err)
+	}
+	unimpl2, err := New(unimpl2Conf, Args{
+		ID:        testutil.RandomContainerID(),
+		Spec:      unimpl2Spec,
+		BundleDir: unimpl2Bundle,
+	})
+	if err != nil {
+		t.Fatalf("error creating second container: %v", err)
+	}
+	defer unimpl2.Destroy()
+	if err := unimpl2.Start(unimpl2Conf); err != nil {
+		t.Fatalf("Cannot start second container: %v", err)
+	}
+	metricData, err := te.client.GetMetrics(te.testCtx, nil)
+	if err != nil {
+		t.Fatalf("Cannot get metrics: %v", err)
+	}
+	metricDataPtr := &metricData
+
+	// For this test to work, it must wait for long enough such that the containers have
+	// actually tried to call the unimplemented syscall so that it shows up in metrics.
+	waitCtx, waitCtxCancel := context.WithTimeout(te.testCtx, 50*time.Second)
+	defer waitCtxCancel()
+
+	for _, test := range []struct {
+		cont          *Container
+		sysno         int
+		wantExistence bool
+	}{
+		{unimpl1, 1337, true},
+		// TODO(b/278108862): Uncomment this: {unimpl1, 1338, false},
+		// TODO(b/278108862): Uncomment this: {unimpl2, 1337, false},
+		{unimpl2, 1338, true},
+	} {
+		// TODO(b/278108862): Undo this hack:
+		test.sysno = -1
+
+		t.Run(fmt.Sprintf("container %s syscall %d", test.cont.ID, test.sysno), func(t *testing.T) {
+			check := func() error {
+				got, _, err := metricDataPtr.GetPrometheusContainerInteger(metricclient.WantMetric{
+					Metric:      "testmetric_unimplemented_syscalls",
+					Sandbox:     test.cont.sandboxID(),
+					ExtraLabels: map[string]string{"sysno": strconv.Itoa(test.sysno)},
+				})
+				if test.wantExistence {
+					if err != nil {
+						return fmt.Errorf("cannot get unimplemented syscall metric for sysno=%d even though we expected its presence: %v", test.sysno, err)
+					}
+					if got <= 0 /* TODO(b/278108862): Revert to got != 1 */ {
+						return fmt.Errorf("expected counter value for unimplemented syscall %d be exactly 1, got %d", test.sysno, got)
+					}
+				} else /* !test.wantExistence */ {
+					if err == nil {
+						return fmt.Errorf("unimplemented syscall metric for sysno=%d was unexpectedly present (value: %d)", test.sysno, got)
+					}
+				}
+				return nil
+			}
+			for waitCtx.Err() == nil {
+				if check() == nil {
+					break
+				}
+				select {
+				case <-time.After(20 * time.Millisecond):
+					newMetricData, err := te.client.GetMetrics(te.testCtx, nil)
+					if err != nil {
+						t.Fatalf("Cannot get metrics: %v", err)
+					}
+					*metricDataPtr = newMetricData
+				case <-waitCtx.Done():
+				}
+			}
+			if err := check(); err != nil {
+				t.Error(err.Error())
+			}
+		})
+	}
+	if t.Failed() {
+		t.Logf("Last metric data:\n\n%s\n\n", metricData)
 	}
 }

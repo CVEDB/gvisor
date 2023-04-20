@@ -97,27 +97,38 @@ func (c *MetricClient) Close() {
 // req performs an HTTP request against the metrics server.
 // It returns an http.Response, and a function to close out the request that should be called when
 // the response is no longer necessary.
-func (c *MetricClient) req(ctx context.Context, timeout time.Duration, endpoint string, params map[string]string) (*http.Response, func(), error) {
+func (c *MetricClient) req(ctx context.Context, timeout time.Duration, method, endpoint string, params map[string]string) (*http.Response, func(), error) {
 	cancelFunc := context.CancelFunc(func() {})
 	if timeout != 0 {
 		ctx, cancelFunc = context.WithTimeout(ctx, timeout)
 	}
-	method := http.MethodGet
 	var bodyBytes io.Reader
-	if params != nil {
-		method = http.MethodPost
-		values := url.Values{}
-		for k, v := range params {
-			values.Set(k, v)
+	var getSuffix string
+	if len(params) != 0 {
+		switch method {
+		case http.MethodGet:
+			getParams := url.Values{}
+			for k, v := range params {
+				getParams.Add(k, v)
+			}
+			getSuffix = fmt.Sprintf("?%s", getParams.Encode())
+		case http.MethodPost:
+			values := url.Values{}
+			for k, v := range params {
+				values.Set(k, v)
+			}
+			bodyBytes = strings.NewReader(values.Encode())
+		default:
+			cancelFunc()
+			return nil, nil, fmt.Errorf("unsupported method: %v", method)
 		}
-		bodyBytes = strings.NewReader(values.Encode())
 	}
-	req, err := http.NewRequestWithContext(ctx, method, fmt.Sprintf("http://runsc-metrics%s", endpoint), bodyBytes)
+	req, err := http.NewRequestWithContext(ctx, method, fmt.Sprintf("http://runsc-metrics%s%s", endpoint, getSuffix), bodyBytes)
 	if err != nil {
 		cancelFunc()
 		return nil, nil, fmt.Errorf("cannot create request object: %v", err)
 	}
-	if params != nil {
+	if method == http.MethodPost {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
 	resp, err := c.client.Do(req)
@@ -144,7 +155,7 @@ func (c *MetricClient) HealthCheck(ctx context.Context) error {
 	//  - The server is running, and the /runsc-metrics/healthcheck request succeeds.
 	//  - The server is running, but it is shutting down. The metrics server will fail the
 	//    /runsc-metrics/healthcheck request in this case.
-	resp, closeReq, err := c.req(ctx, 5*time.Second, "/runsc-metrics/healthcheck", map[string]string{
+	resp, closeReq, err := c.req(ctx, 5*time.Second, http.MethodPost, "/runsc-metrics/healthcheck", map[string]string{
 		"root": c.rootDir,
 	})
 	if err != nil {
@@ -167,7 +178,7 @@ func (c *MetricClient) HealthCheck(ctx context.Context) error {
 // Callers should call ShutdownServer to stop the server.
 // A running server must be stopped before a new one can be successfully started.
 // baseConf is used for passing other flags to the server, e.g. debug log directory.
-func (c *MetricClient) SpawnServer(ctx context.Context, baseConf *config.Config) error {
+func (c *MetricClient) SpawnServer(ctx context.Context, baseConf *config.Config, extraArgs ...string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.server != nil {
@@ -209,6 +220,7 @@ func (c *MetricClient) SpawnServer(ctx context.Context, baseConf *config.Config)
 	// shown as `exe`.
 	c.server.Args[0] = "runsc-metrics"
 	c.server.Args = append(c.server.Args, "metric-server")
+	c.server.Args = append(c.server.Args, extraArgs...)
 	if err := c.server.Start(); err != nil {
 		return fmt.Errorf("cannot start metrics server: %w", err)
 	}
@@ -262,8 +274,16 @@ func (c *MetricClient) ShutdownServer(ctx context.Context) error {
 type MetricData string
 
 // GetMetrics returns the raw Prometheus-formatted metric data from the metric server.
-func (c *MetricClient) GetMetrics(ctx context.Context) (MetricData, error) {
-	resp, closeReq, err := c.req(ctx, 10*time.Second, "/metrics", nil)
+// `urlParams` may contain a special parameter with the empty string as the key.
+// If this is set, that string is used to override the request path from its default
+// value of `/metrics`.
+func (c *MetricClient) GetMetrics(ctx context.Context, urlParams map[string]string) (MetricData, error) {
+	path := "/metrics"
+	if overridePath, found := urlParams[""]; found {
+		path = overridePath
+		delete(urlParams, "")
+	}
+	resp, closeReq, err := c.req(ctx, 10*time.Second, http.MethodGet, path, urlParams)
 	if err != nil {
 		return "", fmt.Errorf("cannot get /metrics: %v", err)
 	}
@@ -328,9 +348,9 @@ func (m MetricData) GetPrometheusInteger(metricName string, wantLabels map[strin
 	data := metricData.GetMetric()[foundIndex]
 	// Convert the value of this data point to an int regardless of its underlying Prometheus type.
 	var floatValue float64
-	if data.GetCounter().Value != nil {
+	if data.GetCounter() != nil && data.GetCounter().Value != nil {
 		floatValue = data.GetCounter().GetValue()
-	} else if data.GetGauge().Value != nil {
+	} else if data.GetGauge() != nil && data.GetGauge().Value != nil {
 		floatValue = data.GetGauge().GetValue()
 	} else {
 		return 0, time.Time{}, fmt.Errorf("metric is not numerical: %v", data)
@@ -350,6 +370,8 @@ type WantMetric struct {
 	// Pod and Namespace are the pod and namespace labels associated with the sandbox.
 	// Leave empty if the sandbox metadata doesn't contain this information.
 	Pod, Namespace string
+	// ExtraLabels are additional key-value labels that must match.
+	ExtraLabels map[string]string
 }
 
 // GetPrometheusContainerInteger returns the integer value of a Prometheus metric from the
@@ -359,10 +381,13 @@ func (m MetricData) GetPrometheusContainerInteger(want WantMetric) (int64, time.
 		"sandbox": want.Sandbox,
 	}
 	if want.Pod != "" {
-		labels["pod"] = want.Pod
+		labels["pod_name"] = want.Pod
 	}
 	if want.Namespace != "" {
-		labels["namespace"] = want.Namespace
+		labels["namespace_name"] = want.Namespace
+	}
+	for k, v := range want.ExtraLabels {
+		labels[k] = v
 	}
 	return m.GetPrometheusInteger(want.Metric, labels)
 }

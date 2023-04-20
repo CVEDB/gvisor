@@ -1,41 +1,45 @@
 load("//tools:defs.bzl", "go_library")
 load("//tools/go_generics:defs.bzl", "go_template_instance")
 
-package(licenses = ["notice"])
+package(
+    default_applicable_licenses = ["//:license"],
+    licenses = ["notice"],
+)
 
 go_template_instance(
-    name = "subprocess_list",
-    out = "subprocess_list.go",
+    name = "subprocess_refs",
+    out = "subprocess_refs.go",
     package = "systrap",
     prefix = "subprocess",
-    template = "//pkg/ilist:generic_list",
+    template = "//pkg/refs:refs_template",
     types = {
-        "Linker": "*subprocess",
-        "Element": "*subprocess",
+        "T": "subprocess",
     },
 )
 
 go_library(
     name = "systrap",
     srcs = [
+        "context_decoupling_disable.go",
+        "context_decoupling_enable.go",
+        "context_queue.go",
         "filters.go",
         "filters_amd64.go",
         "filters_arm64.go",
         "lib_amd64.s",
         "lib_arm64.s",
+        "shared_context.go",
         "stub_amd64.s",
         "stub_arm64.s",
         "stub_defs.go",
         "stub_unsafe.go",
         "subprocess.go",
         "subprocess_amd64.go",
-        "subprocess_amd64_unsafe.go",
         "subprocess_arm64.go",
-        "subprocess_arm64_unsafe.go",
         "subprocess_linux.go",
         "subprocess_linux_unsafe.go",
-        "subprocess_list.go",
         "subprocess_pool.go",
+        "subprocess_refs.go",
         "subprocess_unsafe.go",
         "syscall_thread.go",
         "syscall_thread_amd64.go",
@@ -62,6 +66,7 @@ go_library(
         "//pkg/log",
         "//pkg/memutil",
         "//pkg/pool",
+        "//pkg/refs",
         "//pkg/safecopy",
         "//pkg/seccomp",
         "//pkg/sentry/arch",
@@ -72,6 +77,7 @@ go_library(
         "//pkg/sentry/platform/systrap/sysmsg",
         "//pkg/sentry/platform/systrap/usertrap",
         "//pkg/sentry/usage",
+        "//pkg/sync",
         "@org_golang_x_sys//unix:go_default_library",
     ],
 )

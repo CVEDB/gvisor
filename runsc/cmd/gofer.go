@@ -67,6 +67,9 @@ type Gofer struct {
 	specFD       int
 	mountsFD     int
 	syncUsernsFD int
+	// procMountSyncFD is a file descriptor that has to be closed when the
+	// procfs mount isn't needed anymore.
+	procMountSyncFD int
 
 	profileFDs    profile.FDArgs
 	stopProfiling func()
@@ -98,6 +101,7 @@ func (g *Gofer) SetFlags(f *flag.FlagSet) {
 	f.IntVar(&g.specFD, "spec-fd", -1, "required fd with the container spec")
 	f.IntVar(&g.mountsFD, "mounts-fd", -1, "mountsFD is the file descriptor to write list of mounts after they have been resolved (direct paths, no symlinks).")
 	f.IntVar(&g.syncUsernsFD, "sync-userns-fd", -1, "file descriptor used to synchronize rootless user namespace initialization.")
+	f.IntVar(&g.procMountSyncFD, "proc-mount-sync-fd", -1, "file descriptor that has to be written to when /proc isn't needed anymore and can be unmounted")
 
 	// Profiling flags.
 	g.profileFDs.SetFromFlags(f)
@@ -146,12 +150,29 @@ func (g *Gofer) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomm
 		if err := setupRootFS(spec, conf); err != nil {
 			util.Fatalf("Error setting up root FS: %v", err)
 		}
+		if !conf.TestOnlyAllowRunAsCurrentUserWithoutChroot {
+			// /proc is umounted from a forked process, because the
+			// current one may re-execute itself without capabilities.
+			cmd, w := execProcUmounter()
+			defer cmd.Wait()
+			defer w.Close()
+			if g.procMountSyncFD != -1 {
+				panic("procMountSyncFD is set")
+			}
+			g.procMountSyncFD = int(w.Fd())
+
+			// Clear FD_CLOEXEC. This process may be re-executed. procMountSyncFD
+			// should remain open.
+			if _, _, errno := unix.RawSyscall(unix.SYS_FCNTL, w.Fd(), unix.F_SETFD, 0); errno != 0 {
+				util.Fatalf("error clearing CLOEXEC: %v", errno)
+			}
+		}
 	}
 	if g.applyCaps {
 		// Disable caps when calling myself again.
 		// Note: minimal argument handling for the default case to keep it simple.
 		args := os.Args
-		args = append(args, "--apply-caps=false", "--setup-root=false", "--sync-userns-fd=-1")
+		args = append(args, "--apply-caps=false", "--setup-root=false", "--sync-userns-fd=-1", fmt.Sprintf("--proc-mount-sync-fd=%d", g.procMountSyncFD))
 		util.Fatalf("setCapsAndCallSelf(%v, %v): %v", args, goferCaps, setCapsAndCallSelf(args, goferCaps))
 		panic("unreachable")
 	}
@@ -214,6 +235,10 @@ func (g *Gofer) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomm
 	if err := fsgofer.OpenProcSelfFD(); err != nil {
 		util.Fatalf("failed to open /proc/self/fd: %v", err)
 	}
+	if g.procMountSyncFD != -1 {
+		// procfs isn't needed anymore.
+		umountProc(g.procMountSyncFD)
+	}
 
 	if err := unix.Chroot(root); err != nil {
 		util.Fatalf("failed to chroot to %q: %v", root, err)
@@ -254,8 +279,9 @@ func (g *Gofer) serve(spec *specs.Spec, conf *config.Config, root string) subcom
 	server := fsgofer.NewLisafsServer(fsgofer.Config{
 		// These are global options. Ignore readonly configuration, that is set on
 		// a per connection basis.
-		HostUDS:  conf.GetHostUDS(),
-		HostFifo: conf.HostFifo,
+		HostUDS:            conf.GetHostUDS(),
+		HostFifo:           conf.HostFifo,
+		DonateMountPointFD: conf.DirectFS,
 	})
 	overlay2 := conf.GetOverlay2()
 
@@ -374,6 +400,12 @@ func setupRootFS(spec *specs.Spec, conf *config.Config) error {
 		// know that /proc is an empty tmpfs mount, so this is safe.
 		if err := unix.Mount("runsc-proc", "/proc/proc", "proc", flags|unix.MS_RDONLY, ""); err != nil {
 			util.Fatalf("error mounting proc: %v", err)
+		}
+		// self/fd is bind-mounted, so that the FD return by
+		// OpenProcSelfFD() does not allow escapes with walking ".." .
+		if err := unix.Mount("/proc/proc/self/fd", "/proc/proc/self/fd",
+			"", unix.MS_RDONLY|unix.MS_BIND|unix.MS_NOEXEC, ""); err != nil {
+			util.Fatalf("error mounting proc/self/fd: %v", err)
 		}
 		if err := copyFile("/proc/etc/localtime", "/etc/localtime"); err != nil {
 			log.Warningf("Failed to copy /etc/localtime: %v. UTC timezone will be used.", err)

@@ -19,7 +19,6 @@ package systrap
 
 import (
 	"fmt"
-	"runtime"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -37,13 +36,13 @@ const (
 // resetSysemuRegs sets up emulation registers.
 //
 // This should be called prior to calling sysemu.
-func (t *thread) resetSysemuRegs(regs *arch.Registers) {
-	regs.Cs = t.initRegs.Cs
-	regs.Ss = t.initRegs.Ss
-	regs.Ds = t.initRegs.Ds
-	regs.Es = t.initRegs.Es
-	regs.Fs = t.initRegs.Fs
-	regs.Gs = t.initRegs.Gs
+func (s *subprocess) resetSysemuRegs(regs *arch.Registers) {
+	regs.Cs = s.sysmsgInitRegs.Cs
+	regs.Ss = s.sysmsgInitRegs.Ss
+	regs.Ds = s.sysmsgInitRegs.Ds
+	regs.Es = s.sysmsgInitRegs.Es
+	regs.Fs = s.sysmsgInitRegs.Fs
+	regs.Gs = s.sysmsgInitRegs.Gs
 }
 
 // createSyscallRegs sets up syscall registers.
@@ -211,105 +210,31 @@ func appendArchSeccompRules(rules []seccomp.RuleSet) []seccomp.RuleSet {
 	}...)
 }
 
-func (s *subprocess) PullFullState(c *context, ac *arch.Context64) error {
-	// Reset necessary registers.
-	regs := &ac.StateData().Regs
-
-	sysThread, err := s.getSysmsgThread(regs, c, ac)
-	if err != nil {
-		return err
-	}
-	msg := sysThread.msg
-
-	// In case of EventTypeSyscallTrap, we have only syscall argument
-	// registers and we need to trigger a signal in the stub process to get
-	// a full set of registers and an FPU state.
-	//
-	// In other cases, we have the full set of registers and need only copy
-	// the FPU state from a signal frame.
-	if msg.Type != sysmsg.EventTypeSyscallTrap {
-		s.saveFPState(msg, sysThread.fpuStateToMsgOffset, c, ac)
-		return nil
-	}
-
-	// In case of EventTypeSyscallTrap, the Sentry knows only the syscall
-	// number and syscall arguments and the target thread is stopped in the
-	// syshandler stub function. We need to ask syshandler to trigger a
-	// real syscall to get the full state.
-	msg.Regs = regs.PtraceRegs
-
-	sysThread.waitEvent(sysmsg.StateSigact)
-
-	if msg.Err != 0 {
-		panic(fmt.Sprintf("stub thread failed: err %d line %d: %s", msg.Err, msg.Line, msg))
-	}
-
-	if msg.Type != sysmsg.EventTypeSyscall {
-		panic(fmt.Sprintf("unknown message type: type %v: %s", msg.Type, msg))
-	}
-
-	sysThread.fpuStateToMsgOffset, err = msg.FPUStateOffset()
-	if err != nil {
-		return err
-	}
-
-	// When we are triggering the real syscall instruction, we don't
-	// restore all syscall arguments and even the syscall number.
-	msg.Regs.Rax = regs.Rax
-	msg.Regs.Orig_rax = regs.Orig_rax
-	msg.Regs.Rdi = regs.Rdi
-	msg.Regs.Rsi = regs.Rsi
-	msg.Regs.Rdx = regs.Rdx
-	msg.Regs.R10 = regs.R10
-	msg.Regs.R8 = regs.R8
-	msg.Regs.R9 = regs.R9
-	regs.PtraceRegs = msg.Regs
-
-	// The thread has restored all registers that could be changed in
-	// the syshandler stub function, but it is still in this function. We
-	// know the return address and let's set it so to be not affected if
-	// the stub code will be changed after save/restore.
-	regs.Rip = msg.RetAddr
-
-	s.saveFPState(msg, sysThread.fpuStateToMsgOffset, c, ac)
-
-	c.signalInfo = msg.SignalInfo
-
-	return nil
+func restoreArchSpecificState(ctx *sysmsg.ThreadContext, ac *arch.Context64) {
 }
 
-func restoreArchSpecificState(regs *arch.Registers, t *thread, sysThread *sysmsgThread, msg *sysmsg.Msg, _ *arch.Context64) {
-	regs.Gs_base = msg.Self
-
-	// Switching gs_base is a rare operation, therefore checking that we need to do
-	// so is better done in the sentry, because doing so on a host that doesn't
-	// have FSGSBASE instructions enabled is quite expensive since it would require
-	// an ARCH_PRCTL syscall.
-	if regs.Gs_base != sysThread.gsBase {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-
-		t.attach()
-
-		var r arch.Registers
-		if err := t.getRegs(&r); err != nil {
-			panic(fmt.Sprintf("ptrace get regs failed: %v", err))
-		}
-		r.Gs_base = regs.Gs_base
-		if err := t.setRegs(&r); err != nil {
-			panic(fmt.Sprintf("ptrace set regs failed: %v", err))
-		}
-		if _, _, errno := unix.RawSyscall6(unix.SYS_PTRACE, unix.PTRACE_DETACH, uintptr(t.tid), 0, 0, 0, 0); errno != 0 {
-			panic(fmt.Sprintf("ptrace detach failed: %v", errno))
-		}
-		sysThread.gsBase = regs.Gs_base
+func setArchSpecificRegs(sysThread *sysmsgThread, regs *arch.Registers) {
+	if contextDecouplingExp {
+		// Set the start function and initial stack.
+		regs.PtraceRegs.Rip = uint64(stubSysmsgStart + uintptr(sysmsg.Sighandler_blob_offset____export_start))
+		regs.PtraceRegs.Rsp = uint64(sysmsg.StackAddrToSyshandlerStack(sysThread.sysmsgPerThreadMemAddr()))
 	}
-}
 
-func archSpecificSysThreadInit(sysThread *sysmsgThread, regs *arch.Registers) {
+	// Set gs_base; this is the only time we set it and we don't expect it to ever
+	// change for any thread.
 	regs.Gs_base = sysThread.msg.Self
-	sysThread.gsBase = regs.Gs_base
 }
 
-func retrieveArchSpecificState(regs *arch.Registers, msg *sysmsg.Msg, _ *thread, ac *arch.Context64) {
+func retrieveArchSpecificState(ctx *sysmsg.ThreadContext, ac *arch.Context64) {
+}
+
+func archSpecificSysmsgThreadInit(sysThread *sysmsgThread) {
+	// Send a fake event to stop the BPF process so that it enters the sighandler.
+	// If there is no coupled context we don't want that to happen because the
+	// thread needs to find a context first.
+	if !contextDecouplingExp {
+		if _, _, e := unix.RawSyscall(unix.SYS_TGKILL, uintptr(sysThread.thread.tgid), uintptr(sysThread.thread.tid), uintptr(unix.SIGSEGV)); e != 0 {
+			panic(fmt.Sprintf("tkill failed: %v", e))
+		}
+	}
 }

@@ -1086,7 +1086,7 @@ func TestMultiContainerDifferentFilesystems(t *testing.T) {
 
 	// Make sure overlay is enabled, and none of the root filesystems are
 	// read-only, otherwise we won't be able to create the file.
-	conf.Overlay = true
+	conf.Overlay2 = config.Overlay2{RootMount: true, SubMounts: true, Medium: "memory"}
 	specs, ids := createSpecs(cmdRoot, cmd, cmd)
 	for _, s := range specs {
 		s.Root.Readonly = false
@@ -1817,7 +1817,7 @@ func TestMultiContainerLoadSandbox(t *testing.T) {
 
 	// Load the sandbox and check that the correct containers were returned.
 	id := wants[0].Sandbox.ID
-	gots, err := loadSandbox(conf.RootDir, id)
+	gots, err := LoadSandbox(conf.RootDir, id, LoadOpts{})
 	if err != nil {
 		t.Fatalf("loadSandbox()=%v", err)
 	}
@@ -2205,7 +2205,7 @@ func TestMultiContainerShm(t *testing.T) {
 	}
 
 	// Check that file can be found in the other container.
-	out, err := executeCombinedOutput(conf, containers[1], "/bin/cat", output)
+	out, err := executeCombinedOutput(conf, containers[1], nil, "/bin/cat", output)
 	if err != nil {
 		t.Fatalf("exec failed: %v", err)
 	}

@@ -176,6 +176,13 @@ type Args struct {
 	//
 	// It only applies for the init container.
 	Attached bool
+
+	// PassFiles are user-supplied files from the host to be exposed to the
+	// sandboxed app.
+	PassFiles map[int]*os.File
+
+	// ExecFile is the host file used for program execution.
+	ExecFile *os.File
 }
 
 // New creates the container in a new Sandbox process, unless the metadata
@@ -189,6 +196,10 @@ func New(conf *config.Config, args Args) (*Container, error) {
 
 	if err := os.MkdirAll(conf.RootDir, 0711); err != nil {
 		return nil, fmt.Errorf("creating container root directory %q: %v", conf.RootDir, err)
+	}
+
+	if err := modifySpecForDirectfs(conf, args.Spec); err != nil {
+		return nil, fmt.Errorf("failed to modify spec for directfs: %v", err)
 	}
 
 	sandboxID := args.ID
@@ -292,6 +303,8 @@ func New(conf *config.Config, args Args) (*Container, error) {
 				Cgroup:                containerCgroup,
 				Attached:              args.Attached,
 				OverlayFilestoreFiles: overlayFilestoreFiles,
+				PassFiles:             args.PassFiles,
+				ExecFile:              args.ExecFile,
 			}
 			sand, err := sandbox.New(conf, sandArgs)
 			if err != nil {
@@ -521,6 +534,15 @@ func Run(conf *config.Config, args Args) (unix.WaitStatus, error) {
 			return 0, fmt.Errorf("starting container: %v", err)
 		}
 	}
+
+	// If we allocate a terminal, forward signals to the sandbox process.
+	// Otherwise, Ctrl+C will terminate this process and its children,
+	// including the terminal.
+	if c.Spec.Process.Terminal {
+		stopForwarding := c.ForwardSignals(0, true /* fgProcess */)
+		defer stopForwarding()
+	}
+
 	if args.Attached {
 		return c.Wait()
 	}
@@ -554,6 +576,15 @@ func (c *Container) Event() (*boot.EventOut, error) {
 	c.populateStats(event)
 
 	return event, nil
+}
+
+// PortForward starts port forwarding to the container.
+func (c *Container) PortForward(opts *boot.PortForwardOpts) error {
+	if err := c.requireStatus("port forward", Running); err != nil {
+		return err
+	}
+	opts.ContainerID = c.ID
+	return c.Sandbox.PortForward(opts)
 }
 
 // SandboxPid returns the Getpid of the sandbox the container is running in, or -1 if the
@@ -1059,7 +1090,11 @@ func (c *Container) createGoferProcess(spec *specs.Spec, conf *config.Config, bu
 
 	// Start with the general config flags.
 	cmd := exec.Command(specutils.ExePath, conf.ToFlags()...)
-	cmd.SysProcAttr = &unix.SysProcAttr{}
+	cmd.SysProcAttr = &unix.SysProcAttr{
+		// Detach from session. Otherwise, signals sent to the foreground process
+		// will also be forwarded by this process, resulting in duplicate signals.
+		Setsid: true,
+	}
 
 	// Set Args[0] to make easier to spot the gofer process. Otherwise it's
 	// shown as `exe`.
@@ -1270,6 +1305,31 @@ func (c *Container) IsSandboxRunning() bool {
 	return c.Sandbox != nil && c.Sandbox.IsRunning()
 }
 
+// HasCapabilityInAnySet returns true if the given capability is in any of the
+// capability sets of the container process.
+func (c *Container) HasCapabilityInAnySet(capability linux.Capability) bool {
+	capString := capability.String()
+	for _, set := range [5][]string{
+		c.Spec.Process.Capabilities.Bounding,
+		c.Spec.Process.Capabilities.Effective,
+		c.Spec.Process.Capabilities.Inheritable,
+		c.Spec.Process.Capabilities.Permitted,
+		c.Spec.Process.Capabilities.Ambient,
+	} {
+		for _, c := range set {
+			if c == capString {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// RunsAsUID0 returns true if the container process runs with UID 0 (root).
+func (c *Container) RunsAsUID0() bool {
+	return c.Spec.Process.User.UID == 0
+}
+
 func (c *Container) requireStatus(action string, statuses ...Status) error {
 	for _, s := range statuses {
 		if c.Status == s {
@@ -1277,6 +1337,11 @@ func (c *Container) requireStatus(action string, statuses ...Status) error {
 		}
 	}
 	return fmt.Errorf("cannot %s container %q in state %s", action, c.ID, c.Status)
+}
+
+// IsSandboxRoot returns true if this container is its sandbox's root container.
+func (c *Container) IsSandboxRoot() bool {
+	return isRoot(c.Spec)
 }
 
 func isRoot(spec *specs.Spec) bool {
@@ -1319,7 +1384,7 @@ func adjustSandboxOOMScoreAdj(s *sandbox.Sandbox, spec *specs.Spec, rootDir stri
 		return nil
 	}
 
-	containers, err := loadSandbox(rootDir, s.ID)
+	containers, err := LoadSandbox(rootDir, s.ID, LoadOpts{})
 	if err != nil {
 		return fmt.Errorf("loading sandbox containers: %v", err)
 	}
@@ -1552,4 +1617,51 @@ func cgroupInstall(conf *config.Config, cg cgroup.Cgroup, res *specs.LinuxResour
 		}
 	}
 	return cg, nil
+}
+
+func modifySpecForDirectfs(conf *config.Config, spec *specs.Spec) error {
+	if !conf.DirectFS || conf.TestOnlyAllowRunAsCurrentUserWithoutChroot {
+		return nil
+	}
+	if conf.Network == config.NetworkHost {
+		// Hostnet feature requires the sandbox to run in the current user
+		// namespace, in which the network namespace is configured.
+		return nil
+	}
+	if _, ok := specutils.GetNS(specs.UserNamespace, spec); ok {
+		// If the spec already defines a userns, use that.
+		return nil
+	}
+	if spec.Linux == nil {
+		spec.Linux = &specs.Linux{}
+	}
+	if len(spec.Linux.UIDMappings) > 0 || len(spec.Linux.GIDMappings) > 0 {
+		// The spec can only define UID/GID mappings with a userns (checked above).
+		return fmt.Errorf("spec defines UID/GID mappings without defining userns")
+	}
+	// Run the sandbox in a new user namespace with identity UID/GID mappings.
+	spec.Linux.Namespaces = append(spec.Linux.Namespaces, specs.LinuxNamespace{Type: specs.UserNamespace})
+	// The maximum range of UID/GID mapping should be the largest uint32 integer.
+	// This is similar to what Linux does for identity mappings. Also note:
+	// "This leaves 4294967295 (the 32-bit signed -1 value) unmapped. This is
+	// deliberate: (uid_t) -1 is used in several interfaces (e.g., setreuid(2))
+	// as a way to specify "no user ID".  Leaving (uid_t) -1 unmapped and
+	// unusable guarantees that there will be no confusion when using these
+	// interfaces." -- user_namespaces(7).
+	maxRange := ^uint32(0)
+	spec.Linux.UIDMappings = []specs.LinuxIDMapping{
+		{
+			ContainerID: 0,
+			HostID:      0,
+			Size:        maxRange,
+		},
+	}
+	spec.Linux.GIDMappings = []specs.LinuxIDMapping{
+		{
+			ContainerID: 0,
+			HostID:      0,
+			Size:        maxRange,
+		},
+	}
+	return nil
 }

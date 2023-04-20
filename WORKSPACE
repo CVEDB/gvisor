@@ -26,6 +26,16 @@ load("@bazel_skylib//:workspace.bzl", "bazel_skylib_workspace")
 
 bazel_skylib_workspace()
 
+# Load license rules.
+http_archive(
+    name = "rules_license",
+    sha256 = "6157e1e68378532d0241ecd15d3c45f6e5cfd98fc10846045509fb2a7cc9e381",
+    urls = [
+        "https://github.com/bazelbuild/rules_license/releases/download/0.0.4/rules_license-0.0.4.tar.gz",
+        "https://mirror.bazel.build/github.com/bazelbuild/rules_license/releases/download/0.0.4/rules_license-0.0.4.tar.gz",
+    ],
+)
+
 # Load go bazel rules and gazelle.
 #
 # Note that this repository actually patches some other Go repositories as it
@@ -145,10 +155,10 @@ http_archive(
 # Load C++ cross-compilation toolchains.
 http_archive(
     name = "coral_crosstool",
-    sha256 = "088ef98b19a45d7224be13636487e3af57b1564880b67df7be8b3b7eee4a1bfc",
-    strip_prefix = "crosstool-142e930ac6bf1295ff3ba7ba2b5b6324dfb42839",
+    sha256 = "f86d488ca353c5ee99187579fe408adb73e9f2bb1d69c6e3a42ffb904ce3ba01",
+    strip_prefix = "crosstool-8e885509123395299bed6a5f9529fdc1b9751599",
     urls = [
-        "https://github.com/google-coral/crosstool/archive/142e930ac6bf1295ff3ba7ba2b5b6324dfb42839.tar.gz",
+        "https://github.com/google-coral/crosstool/archive/8e885509123395299bed6a5f9529fdc1b9751599.tar.gz",
     ],
 )
 
@@ -1420,10 +1430,10 @@ http_archive(
     name = "com_github_grpc_grpc",
     patch_args = ["-p1"],
     patches = ["//tools:grpc_extra_deps.patch"],
-    sha256 = "b55696fb249669744de3e71acc54a9382bea0dce7cd5ba379b356b12b82d4229",
-    strip_prefix = "grpc-1.51.1",
+    sha256 = "ec125d7fdb77ecc25b01050a0d5d32616594834d3fe163b016768e2ae42a2df6",
+    strip_prefix = "grpc-1.52.1",
     urls = [
-        "https://github.com/grpc/grpc/archive/v1.51.1.tar.gz",
+        "https://github.com/grpc/grpc/archive/v1.52.1.tar.gz",
     ],
 )
 
@@ -1447,11 +1457,11 @@ http_archive(
 
 http_archive(
     name = "com_google_benchmark",
-    sha256 = "3c6a165b6ecc948967a1ead710d4a181d7b0fbcaa183ef7ea84604994966221a",
-    strip_prefix = "benchmark-1.5.0",
+    sha256 = "6430e4092653380d9dc4ccb45a1e2dc9259d581f4866dc0759713126056bc1d7",
+    strip_prefix = "benchmark-1.7.1",
     urls = [
-        "https://mirror.bazel.build/github.com/google/benchmark/archive/v1.5.0.tar.gz",
-        "https://github.com/google/benchmark/archive/v1.5.0.tar.gz",
+        "https://mirror.bazel.build/github.com/google/benchmark/archive/v1.7.1.tar.gz",
+        "https://github.com/google/benchmark/archive/v1.7.1.tar.gz",
     ],
 )
 
@@ -1475,8 +1485,8 @@ http_file(
 
 http_file(
     name = "github_workflow_schema",
-    sha256 = "60603d1095b11d136e04a8b95be83a23ad8044169e46f82f925c320c1cf47a49",
-    urls = ["https://raw.githubusercontent.com/SchemaStore/schemastore/27612065234778feaac216ce14dd47846fe0a2dd/src/schemas/json/github-workflow.json"],
+    sha256 = "7499ccb3e75975504ea1ee7c70291e0c9f6c1f684678091d013061fe263e3ddb",
+    urls = ["https://raw.githubusercontent.com/SchemaStore/schemastore/166136b96a14f103a948053903e9339e63ad9170/src/schemas/json/github-workflow.json"],
 )
 
 # External Go repositories.

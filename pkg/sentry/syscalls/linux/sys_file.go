@@ -35,7 +35,7 @@ import (
 )
 
 // Mknod implements Linux syscall mknod(2).
-func Mknod(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Mknod(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	addr := args[0].Pointer()
 	mode := args[1].ModeT()
 	dev := args[2].Uint()
@@ -43,7 +43,7 @@ func Mknod(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 }
 
 // Mknodat implements Linux syscall mknodat(2).
-func Mknodat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Mknodat(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	dirfd := args[0].Int()
 	addr := args[1].Pointer()
 	mode := args[2].ModeT()
@@ -75,7 +75,7 @@ func mknodat(t *kernel.Task, dirfd int32, addr hostarch.Addr, mode linux.FileMod
 }
 
 // Open implements Linux syscall open(2).
-func Open(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Open(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	addr := args[0].Pointer()
 	flags := args[1].Uint()
 	mode := args[2].ModeT()
@@ -83,7 +83,7 @@ func Open(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallC
 }
 
 // Openat implements Linux syscall openat(2).
-func Openat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Openat(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	dirfd := args[0].Int()
 	addr := args[1].Pointer()
 	flags := args[2].Uint()
@@ -92,7 +92,7 @@ func Openat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 }
 
 // Creat implements Linux syscall creat(2).
-func Creat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Creat(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	addr := args[0].Pointer()
 	mode := args[1].ModeT()
 	return openat(t, linux.AT_FDCWD, addr, linux.O_WRONLY|linux.O_CREAT|linux.O_TRUNC, mode)
@@ -125,7 +125,7 @@ func openat(t *kernel.Task, dirfd int32, pathAddr hostarch.Addr, flags uint32, m
 }
 
 // Access implements Linux syscall access(2).
-func Access(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Access(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	addr := args[0].Pointer()
 	mode := args[1].ModeT()
 
@@ -133,7 +133,7 @@ func Access(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 }
 
 // Faccessat implements Linux syscall faccessat(2).
-func Faccessat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Faccessat(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	dirfd := args[0].Int()
 	addr := args[1].Pointer()
 	mode := args[2].ModeT()
@@ -142,7 +142,7 @@ func Faccessat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sys
 }
 
 // Faccessat2 implements Linux syscall faccessat2(2).
-func Faccessat2(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Faccessat2(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	dirfd := args[0].Int()
 	addr := args[1].Pointer()
 	mode := args[2].ModeT()
@@ -199,7 +199,7 @@ func accessAt(t *kernel.Task, dirfd int32, pathAddr hostarch.Addr, mode uint, fl
 }
 
 // Ioctl implements Linux syscall ioctl(2).
-func Ioctl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Ioctl(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	fd := args[0].Int()
 
 	file := t.GetFile(fd)
@@ -283,12 +283,12 @@ func Ioctl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 		return 0, nil, setAsyncOwner(t, int(fd), file, ownerType, who)
 	}
 
-	ret, err := file.Ioctl(t, t.MemoryManager(), args)
+	ret, err := file.Ioctl(t, t.MemoryManager(), sysno, args)
 	return ret, nil, err
 }
 
 // Getcwd implements Linux syscall getcwd(2).
-func Getcwd(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Getcwd(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	addr := args[0].Pointer()
 	size := args[1].SizeT()
 
@@ -320,7 +320,7 @@ func Getcwd(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 }
 
 // Chdir implements Linux syscall chdir(2).
-func Chdir(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Chdir(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	addr := args[0].Pointer()
 
 	path, err := copyInPath(t, addr)
@@ -345,7 +345,7 @@ func Chdir(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 }
 
 // Fchdir implements Linux syscall fchdir(2).
-func Fchdir(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Fchdir(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	fd := args[0].Int()
 
 	tpop, err := getTaskPathOperation(t, fd, fspath.Path{}, allowEmptyPath, nofollowFinalSymlink)
@@ -366,7 +366,7 @@ func Fchdir(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 }
 
 // Chroot implements Linux syscall chroot(2).
-func Chroot(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Chroot(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	addr := args[0].Pointer()
 
 	if !t.HasCapability(linux.CAP_SYS_CHROOT) {
@@ -395,7 +395,7 @@ func Chroot(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 }
 
 // PivotRoot implements Linux syscall pivot_root(2).
-func PivotRoot(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func PivotRoot(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	addr1 := args[0].Pointer()
 	addr2 := args[1].Pointer()
 
@@ -440,7 +440,7 @@ func PivotRoot(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sys
 }
 
 // Close implements Linux syscall close(2).
-func Close(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Close(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	fd := args[0].Int()
 
 	// Note that Remove provides a reference on the file that we may use to
@@ -457,7 +457,7 @@ func Close(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 }
 
 // CloseRange implements linux syscall close_range(2).
-func CloseRange(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func CloseRange(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	first := args[0].Uint()
 	last := args[1].Uint()
 	flags := args[2].Uint()
@@ -511,7 +511,7 @@ func CloseRange(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sy
 }
 
 // Dup implements Linux syscall dup(2).
-func Dup(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Dup(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	fd := args[0].Int()
 
 	file := t.GetFile(fd)
@@ -528,7 +528,7 @@ func Dup(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallCo
 }
 
 // Dup2 implements Linux syscall dup2(2).
-func Dup2(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Dup2(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	oldfd := args[0].Int()
 	newfd := args[1].Int()
 
@@ -546,7 +546,7 @@ func Dup2(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallC
 }
 
 // Dup3 implements Linux syscall dup3(2).
-func Dup3(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Dup3(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	oldfd := args[0].Int()
 	newfd := args[1].Int()
 	flags := args[2].Uint()
@@ -579,7 +579,7 @@ func dup3(t *kernel.Task, oldfd, newfd int32, flags uint32) (uintptr, *kernel.Sy
 }
 
 // Fcntl implements linux syscall fcntl(2).
-func Fcntl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Fcntl(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	fd := args[0].Int()
 	cmd := args[1].Int()
 
@@ -681,11 +681,17 @@ func Fcntl(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 		err := tmpfs.AddSeals(file, args[2].Uint())
 		return 0, nil, err
 	case linux.F_SETLK:
-		return 0, nil, posixLock(t, args, file, false /* block */)
+		return 0, nil, posixLock(t, args, file, false /* ofd */, false /* block */)
 	case linux.F_SETLKW:
-		return 0, nil, posixLock(t, args, file, true /* block */)
+		return 0, nil, posixLock(t, args, file, false /* ofd */, true /* block */)
 	case linux.F_GETLK:
-		return 0, nil, posixTestLock(t, args, file)
+		return 0, nil, posixTestLock(t, args, file, false /* ofd */)
+	case linux.F_OFD_SETLK:
+		return 0, nil, posixLock(t, args, file, true /* ofd */, false /* block */)
+	case linux.F_OFD_SETLKW:
+		return 0, nil, posixLock(t, args, file, true /* ofd */, true /* block */)
+	case linux.F_OFD_GETLK:
+		return 0, nil, posixTestLock(t, args, file, true /* ofd */)
 	case linux.F_GETSIG:
 		a := file.AsyncHandler()
 		if a == nil {
@@ -779,7 +785,7 @@ func setAsyncOwner(t *kernel.Task, fd int, file *vfs.FileDescription, ownerType,
 	}
 }
 
-func posixTestLock(t *kernel.Task, args arch.SyscallArguments, file *vfs.FileDescription) error {
+func posixTestLock(t *kernel.Task, args arch.SyscallArguments, file *vfs.FileDescription, ofd bool) error {
 	// Copy in the lock request.
 	flockAddr := args[2].Pointer()
 	var flock linux.Flock
@@ -799,12 +805,18 @@ func posixTestLock(t *kernel.Task, args arch.SyscallArguments, file *vfs.FileDes
 	if err != nil {
 		return err
 	}
+	uid := lock.UniqueID(t.FDTable())
+	if ofd {
+		uid = lock.UniqueID(file)
+	}
 
-	newFlock, err := file.TestPOSIX(t, t.FDTable(), typ, r)
+	newFlock, err := file.TestPOSIX(t, uid, typ, r)
 	if err != nil {
 		return err
 	}
-	newFlock.PID = translatePID(t.PIDNamespace().Root(), t.PIDNamespace(), newFlock.PID)
+	if !ofd {
+		newFlock.PID = translatePID(t.PIDNamespace().Root(), t.PIDNamespace(), newFlock.PID)
+	}
 	if _, err = newFlock.CopyOut(t, flockAddr); err != nil {
 		return err
 	}
@@ -821,12 +833,22 @@ func translatePID(old, new *kernel.PIDNamespace, pid int32) int32 {
 	return int32(new.IDOfTask(old.TaskWithID(kernel.ThreadID(pid))))
 }
 
-func posixLock(t *kernel.Task, args arch.SyscallArguments, file *vfs.FileDescription, block bool) error {
+func posixLock(t *kernel.Task, args arch.SyscallArguments, file *vfs.FileDescription, ofd bool, block bool) error {
 	// Copy in the lock request.
 	flockAddr := args[2].Pointer()
 	var flock linux.Flock
 	if _, err := flock.CopyIn(t, flockAddr); err != nil {
 		return err
+	}
+	if ofd && flock.PID != 0 {
+		return linuxerr.EINVAL
+	}
+
+	uid := lock.UniqueID(t.FDTable())
+	pid := int32(t.TGIDInRoot())
+	if ofd {
+		uid = lock.UniqueID(file)
+		pid = -1
 	}
 
 	r, err := file.ComputeLockRange(t, uint64(flock.Start), uint64(flock.Len), flock.Whence)
@@ -839,16 +861,16 @@ func posixLock(t *kernel.Task, args arch.SyscallArguments, file *vfs.FileDescrip
 		if !file.IsReadable() {
 			return linuxerr.EBADF
 		}
-		return file.LockPOSIX(t, t.FDTable(), int32(t.TGIDInRoot()), lock.ReadLock, r, block)
+		return file.LockPOSIX(t, uid, pid, lock.ReadLock, r, block)
 
 	case linux.F_WRLCK:
 		if !file.IsWritable() {
 			return linuxerr.EBADF
 		}
-		return file.LockPOSIX(t, t.FDTable(), int32(t.TGIDInRoot()), lock.WriteLock, r, block)
+		return file.LockPOSIX(t, uid, pid, lock.WriteLock, r, block)
 
 	case linux.F_UNLCK:
-		return file.UnlockPOSIX(t, t.FDTable(), r)
+		return file.UnlockPOSIX(t, uid, r)
 
 	default:
 		return linuxerr.EINVAL
@@ -857,7 +879,7 @@ func posixLock(t *kernel.Task, args arch.SyscallArguments, file *vfs.FileDescrip
 
 // Fadvise64 implements fadvise64(2).
 // This implementation currently ignores the provided advice.
-func Fadvise64(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Fadvise64(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	fd := args[0].Int()
 	length := args[2].Int64()
 	advice := args[3].Int()
@@ -898,14 +920,14 @@ func Fadvise64(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sys
 }
 
 // Mkdir implements Linux syscall mkdir(2).
-func Mkdir(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Mkdir(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	addr := args[0].Pointer()
 	mode := args[1].ModeT()
 	return 0, nil, mkdirat(t, linux.AT_FDCWD, addr, mode)
 }
 
 // Mkdirat implements Linux syscall mkdirat(2).
-func Mkdirat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Mkdirat(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	dirfd := args[0].Int()
 	addr := args[1].Pointer()
 	mode := args[2].ModeT()
@@ -928,7 +950,7 @@ func mkdirat(t *kernel.Task, dirfd int32, addr hostarch.Addr, mode uint) error {
 }
 
 // Rmdir implements Linux syscall rmdir(2).
-func Rmdir(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Rmdir(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	pathAddr := args[0].Pointer()
 	return 0, nil, rmdirat(t, linux.AT_FDCWD, pathAddr)
 }
@@ -947,14 +969,14 @@ func rmdirat(t *kernel.Task, dirfd int32, pathAddr hostarch.Addr) error {
 }
 
 // Symlink implements Linux syscall symlink(2).
-func Symlink(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Symlink(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	targetAddr := args[0].Pointer()
 	linkpathAddr := args[1].Pointer()
 	return 0, nil, symlinkat(t, targetAddr, linux.AT_FDCWD, linkpathAddr)
 }
 
 // Symlinkat implements Linux syscall symlinkat(2).
-func Symlinkat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Symlinkat(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	targetAddr := args[0].Pointer()
 	newdirfd := args[1].Int()
 	linkpathAddr := args[2].Pointer()
@@ -982,14 +1004,14 @@ func symlinkat(t *kernel.Task, targetAddr hostarch.Addr, newdirfd int32, linkpat
 }
 
 // Link implements Linux syscall link(2).
-func Link(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Link(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	oldpathAddr := args[0].Pointer()
 	newpathAddr := args[1].Pointer()
 	return 0, nil, linkat(t, linux.AT_FDCWD, oldpathAddr, linux.AT_FDCWD, newpathAddr, 0 /* flags */)
 }
 
 // Linkat implements Linux syscall linkat(2).
-func Linkat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Linkat(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	olddirfd := args[0].Int()
 	oldpathAddr := args[1].Pointer()
 	newdirfd := args[2].Int()
@@ -1030,7 +1052,7 @@ func linkat(t *kernel.Task, olddirfd int32, oldpathAddr hostarch.Addr, newdirfd 
 }
 
 // Readlinkat implements Linux syscall readlinkat(2).
-func Readlinkat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Readlinkat(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	dirfd := args[0].Int()
 	pathAddr := args[1].Pointer()
 	bufAddr := args[2].Pointer()
@@ -1039,7 +1061,7 @@ func Readlinkat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sy
 }
 
 // Readlink implements Linux syscall readlink(2).
-func Readlink(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Readlink(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	pathAddr := args[0].Pointer()
 	bufAddr := args[1].Pointer()
 	size := args[2].SizeT()
@@ -1080,7 +1102,7 @@ func readlinkat(t *kernel.Task, dirfd int32, pathAddr, bufAddr hostarch.Addr, si
 }
 
 // Unlink implements Linux syscall unlink(2).
-func Unlink(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Unlink(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	pathAddr := args[0].Pointer()
 	return 0, nil, unlinkat(t, linux.AT_FDCWD, pathAddr)
 }
@@ -1099,7 +1121,7 @@ func unlinkat(t *kernel.Task, dirfd int32, pathAddr hostarch.Addr) error {
 }
 
 // Unlinkat implements Linux syscall unlinkat(2).
-func Unlinkat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Unlinkat(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	dirfd := args[0].Int()
 	pathAddr := args[1].Pointer()
 	flags := args[2].Int()
@@ -1162,7 +1184,7 @@ func handleSetSizeError(t *kernel.Task, err error) error {
 }
 
 // Truncate implements Linux syscall truncate(2).
-func Truncate(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Truncate(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	addr := args[0].Pointer()
 	length := args[1].Int64()
 
@@ -1186,7 +1208,7 @@ func Truncate(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 }
 
 // Ftruncate implements Linux syscall ftruncate(2).
-func Ftruncate(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Ftruncate(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	fd := args[0].Int()
 	length := args[1].Int64()
 
@@ -1214,14 +1236,14 @@ func Ftruncate(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sys
 }
 
 // Umask implements linux syscall umask(2).
-func Umask(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Umask(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	mask := args[0].ModeT()
 	mask = t.FSContext().SwapUmask(mask & 0777)
 	return uintptr(mask), nil, nil
 }
 
 // Chown implements Linux syscall chown(2).
-func Chown(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Chown(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	pathAddr := args[0].Pointer()
 	owner := args[1].Int()
 	group := args[2].Int()
@@ -1229,7 +1251,7 @@ func Chown(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 }
 
 // Lchown implements Linux syscall lchown(2).
-func Lchown(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Lchown(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	pathAddr := args[0].Pointer()
 	owner := args[1].Int()
 	group := args[2].Int()
@@ -1237,7 +1259,7 @@ func Lchown(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 }
 
 // Fchownat implements Linux syscall fchownat(2).
-func Fchownat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Fchownat(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	dirfd := args[0].Int()
 	pathAddr := args[1].Pointer()
 	owner := args[2].Int()
@@ -1286,7 +1308,7 @@ func populateSetStatOptionsForChown(t *kernel.Task, owner, group int32, opts *vf
 }
 
 // Fchown implements Linux syscall fchown(2).
-func Fchown(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Fchown(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	fd := args[0].Int()
 	owner := args[1].Int()
 	group := args[2].Int()
@@ -1307,14 +1329,14 @@ func Fchown(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 const chmodMask = 0777 | linux.S_ISUID | linux.S_ISGID | linux.S_ISVTX
 
 // Chmod implements Linux syscall chmod(2).
-func Chmod(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Chmod(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	pathAddr := args[0].Pointer()
 	mode := args[1].ModeT()
 	return 0, nil, fchmodat(t, linux.AT_FDCWD, pathAddr, mode)
 }
 
 // Fchmodat implements Linux syscall fchmodat(2).
-func Fchmodat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Fchmodat(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	dirfd := args[0].Int()
 	pathAddr := args[1].Pointer()
 	mode := args[2].ModeT()
@@ -1336,7 +1358,7 @@ func fchmodat(t *kernel.Task, dirfd int32, pathAddr hostarch.Addr, mode uint) er
 }
 
 // Fchmod implements Linux syscall fchmod(2).
-func Fchmod(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Fchmod(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	fd := args[0].Int()
 	mode := args[1].ModeT()
 
@@ -1355,7 +1377,7 @@ func Fchmod(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 }
 
 // Utime implements Linux syscall utime(2).
-func Utime(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Utime(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	pathAddr := args[0].Pointer()
 	timesAddr := args[1].Pointer()
 
@@ -1385,7 +1407,7 @@ func Utime(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscall
 }
 
 // Utimes implements Linux syscall utimes(2).
-func Utimes(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Utimes(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	pathAddr := args[0].Pointer()
 	timesAddr := args[1].Pointer()
 
@@ -1403,7 +1425,7 @@ func Utimes(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Syscal
 }
 
 // Futimesat implements Linux syscall futimesat(2).
-func Futimesat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Futimesat(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	dirfd := args[0].Int()
 	pathAddr := args[1].Pointer()
 	timesAddr := args[2].Pointer()
@@ -1457,7 +1479,7 @@ func populateSetStatOptionsForUtimes(t *kernel.Task, timesAddr hostarch.Addr, op
 }
 
 // Utimensat implements Linux syscall utimensat(2).
-func Utimensat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Utimensat(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	dirfd := args[0].Int()
 	pathAddr := args[1].Pointer()
 	timesAddr := args[2].Pointer()
@@ -1529,14 +1551,14 @@ func populateSetStatOptionsForUtimens(t *kernel.Task, timesAddr hostarch.Addr, o
 }
 
 // Rename implements Linux syscall rename(2).
-func Rename(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Rename(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	oldpathAddr := args[0].Pointer()
 	newpathAddr := args[1].Pointer()
 	return 0, nil, renameat(t, linux.AT_FDCWD, oldpathAddr, linux.AT_FDCWD, newpathAddr, 0 /* flags */)
 }
 
 // Renameat implements Linux syscall renameat(2).
-func Renameat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Renameat(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	olddirfd := args[0].Int()
 	oldpathAddr := args[1].Pointer()
 	newdirfd := args[2].Int()
@@ -1545,7 +1567,7 @@ func Renameat(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sysc
 }
 
 // Renameat2 implements Linux syscall renameat2(2).
-func Renameat2(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Renameat2(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	olddirfd := args[0].Int()
 	oldpathAddr := args[1].Pointer()
 	newdirfd := args[2].Int()
@@ -1582,7 +1604,7 @@ func renameat(t *kernel.Task, olddirfd int32, oldpathAddr hostarch.Addr, newdirf
 }
 
 // Fallocate implements linux system call fallocate(2).
-func Fallocate(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Fallocate(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	fd := args[0].Int()
 	mode := args[1].Uint64()
 	offset := args[2].Int64()
@@ -1621,7 +1643,7 @@ func Fallocate(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.Sys
 }
 
 // Flock implements linux syscall flock(2).
-func Flock(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func Flock(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	fd := args[0].Int()
 	operation := args[1].Int()
 
@@ -1663,7 +1685,7 @@ const (
 )
 
 // MemfdCreate implements the linux syscall memfd_create(2).
-func MemfdCreate(t *kernel.Task, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+func MemfdCreate(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
 	addr := args[0].Pointer()
 	flags := args[1].Uint()
 

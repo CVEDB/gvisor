@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/subcommands"
 	"gvisor.dev/gvisor/pkg/prometheus"
+	"gvisor.dev/gvisor/pkg/sentry/control"
 	"gvisor.dev/gvisor/runsc/cmd/util"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/container"
@@ -29,6 +30,8 @@ import (
 
 // MetricExport implements subcommands.Command for the "metric-export" command.
 type MetricExport struct {
+	exporterPrefix       string
+	sandboxMetricsFilter string
 }
 
 // Name implements subcommands.Command.Name.
@@ -43,11 +46,14 @@ func (*MetricExport) Synopsis() string {
 
 // Usage implements subcommands.Command.Usage.
 func (*MetricExport) Usage() string {
-	return `export-metrics <container id> - prints sandbox metric data in Prometheus metric format`
+	return `export-metrics [-exporter-prefix=<runsc_>] <container id> - prints sandbox metric data in Prometheus metric format
+`
 }
 
 // SetFlags implements subcommands.Command.SetFlags.
 func (m *MetricExport) SetFlags(f *flag.FlagSet) {
+	f.StringVar(&m.exporterPrefix, "exporter-prefix", "runsc_", "Prefix for all metric names, following Prometheus exporter convention")
+	f.StringVar(&m.sandboxMetricsFilter, "sandbox-metrics-filter", "", "If set, filter exported metrics using the specified regular expression. This filtering is applied before adding --exporter-prefix.")
 }
 
 // Execute implements subcommands.Command.Execute.
@@ -70,15 +76,21 @@ func (m *MetricExport) Execute(ctx context.Context, f *flag.FlagSet, args ...any
 		util.Fatalf("Cannot compute Prometheus labels of sandbox: %v", err)
 	}
 
-	snapshot, err := cont.Sandbox.ExportMetrics()
+	snapshot, err := cont.Sandbox.ExportMetrics(control.MetricsExportOpts{
+		OnlyMetrics: m.sandboxMetricsFilter,
+	})
 	if err != nil {
 		util.Fatalf("ExportMetrics failed: %v", err)
 	}
+	commentHeader := fmt.Sprintf("Command-line export for sandbox %s", cont.Sandbox.ID)
+	if m.sandboxMetricsFilter != "" {
+		commentHeader = fmt.Sprintf("%s (filtered using regular expression: %q)", commentHeader, m.sandboxMetricsFilter)
+	}
 	written, err := prometheus.Write(os.Stdout, prometheus.ExportOptions{
-		CommentHeader: fmt.Sprintf("Command-line export for sandbox %s", cont.Sandbox.ID),
+		CommentHeader: commentHeader,
 	}, map[*prometheus.Snapshot]prometheus.SnapshotExportOptions{
 		snapshot: {
-			ExporterPrefix: conf.MetricExporterPrefix,
+			ExporterPrefix: m.exporterPrefix,
 			ExtraLabels:    prometheusLabels,
 		},
 	})

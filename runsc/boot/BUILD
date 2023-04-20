@@ -1,6 +1,9 @@
 load("//tools:defs.bzl", "go_library", "go_test")
 
-package(licenses = ["notice"])
+package(
+    default_applicable_licenses = ["//:license"],
+    licenses = ["notice"],
+)
 
 go_library(
     name = "boot",
@@ -64,7 +67,6 @@ go_library(
         "//pkg/sentry/fsimpl/user",
         "//pkg/sentry/inet",
         "//pkg/sentry/kernel",
-        "//pkg/sentry/kernel:uncaught_signal_go_proto",
         "//pkg/sentry/kernel/auth",
         "//pkg/sentry/limits",
         "//pkg/sentry/loader",
@@ -117,6 +119,7 @@ go_library(
         "//runsc/specutils",
         "//runsc/specutils/seccomp",
         "@com_github_opencontainers_runtime_spec//specs-go:go_default_library",
+        "@com_github_syndtr_gocapability//capability:go_default_library",
         "@org_golang_google_protobuf//proto:go_default_library",
         "@org_golang_x_sys//unix:go_default_library",
     ],
@@ -134,8 +137,10 @@ go_test(
     library = ":boot",
     deps = [
         "//pkg/control/server",
+        "//pkg/cpuid",
         "//pkg/fspath",
         "//pkg/log",
+        "//pkg/sentry/seccheck",
         "//pkg/sentry/vfs",
         "//pkg/sync",
         "//pkg/unet",
@@ -143,6 +148,7 @@ go_test(
         "//runsc/flag",
         "//runsc/fsgofer",
         "@com_github_opencontainers_runtime_spec//specs-go:go_default_library",
+        "@com_github_syndtr_gocapability//capability:go_default_library",
         "@org_golang_x_sys//unix:go_default_library",
     ],
 )

@@ -157,8 +157,14 @@ metric-server`. Simply point Prometheus at this address.
 
 If desired, you can change the
 [exporter name](https://prometheus.io/docs/instrumenting/writing_exporters/)
-(prefix applied to all metric names) using the `--metric-exporter-prefix` flag.
-It defaults to `runsc_`.
+(prefix applied to all metric names) using the `--exporter-prefix` flag. It
+defaults to `runsc_`.
+
+The sandbox metrics exported may be filtered by using the optional `GET`
+parameter `runsc-sandbox-metrics-filter`, e.g.
+`/metrics?runsc-sandbox-metrics-filter=fs_.*`. Metric names must fully match
+this regular expression. Note that this filtering is performed before prepending
+`--exporter-prefix` to metric names.
 
 The metric server also supports listening on a
 [Unix Domain Socket](https://en.wikipedia.org/wiki/Unix_domain_socket). This can
@@ -265,7 +271,7 @@ non-human-friendly hexadecimal strings.
 In order to provide more user-friendly labels, the metric server will pick up
 the `io.kubernetes.cri.sandbox-name` and `io.kubernetes.cri.sandbox-namespace`
 annotations provided by `containerd`, and automatically add these as labels
-(`pod` and `namespace` respectively) for each per-sandbox metric.
+(`pod_name` and `namespace_name` respectively) for each per-sandbox metric.
 
 ## Metrics exported
 
@@ -277,8 +283,8 @@ own metrics as well. All metrics have documentation and type annotations in the
 
 *   `process_start_time_seconds`: Unix timestamp representing the time at which
     the metric server started. This specific metric name is used by Prometheus,
-    and as such its name is not affected by the `--metric-exporter-prefix` flag.
-    This metric is process-wide and has no labels.
+    and as such its name is not affected by the `--exporter-prefix` flag. This
+    metric is process-wide and has no labels.
 *   `num_sandboxes_total`: A process-wide metric representing the total number
     of sandboxes that the metric server knows about.
 *   `num_sandboxes_running`: A process-wide metric representing the number of
@@ -301,5 +307,11 @@ own metrics as well. All metrics have documentation and type annotations in the
     labels contain useful metadata about the sandbox, such as the version
     number, [platform](platforms.md), and [network type](networking.md) being
     used.
+*   `sandbox_capabilities`: A per-sandbox, per-capability metric that carries
+    the union of all capabilities present on at least one container of the
+    sandbox. Can optionally be filtered to only a subset of capabilities using
+    the `runsc-capability-filter` GET parameter on `/metrics` requests (regular
+    expression). Useful for auditing and aggregating the capabilities you rely
+    on across multiple sandboxes.
 *   `sandbox_creation_time_seconds`: A per-sandbox Unix timestamp representing
     the time at which this sandbox was created.

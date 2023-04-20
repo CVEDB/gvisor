@@ -1,6 +1,9 @@
 load("//tools:defs.bzl", "default_platform", "go_library", "go_test", "more_shards", "platforms")
 
-package(licenses = ["notice"])
+package(
+    default_applicable_licenses = ["//:license"],
+    licenses = ["notice"],
+)
 
 go_library(
     name = "container",
@@ -80,7 +83,6 @@ go_test(
         "//pkg/sync",
         "//pkg/test/testutil",
         "//pkg/unet",
-        "//pkg/urpc",
         "//runsc/boot",
         "//runsc/cgroup",
         "//runsc/config",

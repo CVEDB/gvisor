@@ -99,22 +99,18 @@ func newPodMountHints(spec *specs.Spec) (*podMountHints, error) {
 				mnts[name] = mnt
 			}
 			if err := mnt.setField(parts[1], v); err != nil {
-				return nil, err
+				log.Warningf("ignoring invalid mount annotation (name = %q, key = %q, value = %q): %v", name, parts[1], v, err)
 			}
 		}
 	}
 
-	// Validate all hints after done parsing.
+	// Validate all the parsed hints.
 	for name, m := range mnts {
 		log.Infof("Mount annotation found, name: %s, source: %q, type: %s, share: %v", name, m.mount.Source, m.mount.Type, m.share)
-		if m.share == invalid {
-			return nil, fmt.Errorf("share field for %q has not been set", m.name)
-		}
-		if len(m.mount.Source) == 0 {
-			return nil, fmt.Errorf("source field for %q has not been set", m.name)
-		}
-		if len(m.mount.Type) == 0 {
-			return nil, fmt.Errorf("type field for %q has not been set", m.name)
+		if m.share == invalid || len(m.mount.Source) == 0 || len(m.mount.Type) == 0 {
+			log.Warningf("ignoring mount annotations for %q because of missing required field(s)", name)
+			delete(mnts, name)
+			continue
 		}
 
 		// Check for duplicate mount sources.
@@ -157,7 +153,7 @@ func (m *mountHint) setField(key, val string) error {
 		}
 		m.share = share
 	case "options":
-		return m.setOptions(val)
+		m.mount.Options = specutils.FilterMountOptions(strings.Split(val, ","))
 	default:
 		return fmt.Errorf("invalid mount annotation: %s=%s", key, val)
 	}
@@ -174,16 +170,9 @@ func (m *mountHint) setType(val string) error {
 	return nil
 }
 
-func (m *mountHint) setOptions(val string) error {
-	opts := strings.Split(val, ",")
-	if err := specutils.ValidateMountOptions(opts); err != nil {
-		return err
-	}
-	m.mount.Options = opts
-	return nil
-}
-
 func (m *mountHint) isSupported() bool {
+	// TODO(b/142076984): Only support tmpfs for now. Bind mounts require a
+	// common gofer to mount all shared volumes.
 	return m.mount.Type == tmpfs.Name && m.share == pod
 }
 

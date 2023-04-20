@@ -199,18 +199,18 @@ smoke-race-tests: ## Runs a smoke test after build building runsc in race config
 .PHONY: smoke-race-tests
 
 nogo-tests:
-	@$(call test,--build_tag_filters=nogo --test_tag_filters=nogo --//tools/nogo:full //:all pkg/... tools/...)
+	@$(call test,--test_tag_filters=nogo //:all pkg/... tools/...)
 .PHONY: nogo-tests
 
 # For unit tests, we take everything in the root, pkg/... and tools/..., and
 # pull in all directories in runsc except runsc/container.
 unit-tests: ## Local package unit tests in pkg/..., tools/.., etc.
-	@$(call test,--build_tag_filters=-nogo --test_tag_filters=-nogo --test_filter=-//runsc/container/... //:all pkg/... tools/... runsc/... vdso/... test/trace/...)
+	@$(call test,--test_tag_filters=-nogo --test_filter=-//runsc/container/... //:all pkg/... tools/... runsc/... vdso/... test/trace/...)
 .PHONY: unit-tests
 
 # See unit-tests: this includes runsc/container.
 container-tests: $(RUNTIME_BIN) ## Run all tests in runsc/container/...
-	@$(call test,--test_env=RUNTIME=$(RUNTIME_BIN) runsc/container/...)
+	@$(call test,--test_tag_filters=-nogo --test_env=RUNTIME=$(RUNTIME_BIN) runsc/container/...)
 .PHONY: container-tests
 
 tests: ## Runs all unit tests and syscall tests.
@@ -227,7 +227,7 @@ network-tests: iptables-tests packetdrill-tests packetimpact-tests
 .PHONY: network-tests
 
 syscall-tests: $(RUNTIME_BIN) ## Run all system call tests.
-	@$(call test,--test_env=RUNTIME=$(RUNTIME_BIN) $(PARTITIONS) test/syscalls/...)
+	@$(call test,--test_env=RUNTIME=$(RUNTIME_BIN) --cxxopt=-Werror $(PARTITIONS) test/syscalls/...)
 .PHONY: syscall-tests
 
 packetimpact-tests:
@@ -262,21 +262,28 @@ arm-qemu-smoke-test: $(RUNTIME_BIN) load-arm-qemu
 simple-tests: unit-tests # Compatibility target.
 .PHONY: simple-tests
 
+portforward-tests: load-basic_redis load-basic_nginx $(RUNTIME_BIN)
+	@$(call install_runtime,$(RUNTIME),--network=sandbox)
+	@$(call sudo,test/root:portforward_test,--runtime=$(RUNTIME) -test.v)
+	@$(call install_runtime,$(RUNTIME),--network=host)
+	@$(call sudo,test/root:portforward_test,--runtime=$(RUNTIME) -test.v)
+.PHONY: portforward-test
+
 # Standard integration targets.
 INTEGRATION_TARGETS := //test/image:image_test //test/e2e:integration_test
 
 docker-tests: load-basic $(RUNTIME_BIN)
-	@$(call install_runtime,$(RUNTIME),) # Clear flags.
+	@$(call install_runtime,$(RUNTIME),--overlay2=none)
 	@$(call install_runtime,$(RUNTIME)-fdlimit,--fdlimit=2000) # Used by TestRlimitNoFile.
 	@$(call install_runtime,$(RUNTIME)-dcache,--fdlimit=2000 --dcache=100) # Used by TestDentryCacheLimit.
 	@$(call install_runtime,$(RUNTIME)-host-uds,--host-uds=all) # Used by TestHostSocketConnect.
 	@$(call install_runtime,$(RUNTIME)-overlay,--overlay2=all:self) # Used by TestOverlay*.
+	@$(call install_runtime,$(RUNTIME)-no-overlay,--overlay2=none) # Used by TestCheckpointRestore.
 	@$(call test_runtime,$(RUNTIME),$(INTEGRATION_TARGETS) //test/e2e:integration_runtime_test)
 .PHONY: docker-tests
 
-# TODO(b/241832602): Run overlay tests with host filestore option after S/R support is added.
 overlay-tests: load-basic $(RUNTIME_BIN)
-	@$(call install_runtime,$(RUNTIME),--overlay2=all:memory)
+	@$(call install_runtime,$(RUNTIME),--overlay2=all:dir=/tmp)
 	@$(call test_runtime,$(RUNTIME),--test_env=TEST_OVERLAY=true $(INTEGRATION_TARGETS))
 .PHONY: overlay-tests
 
@@ -286,8 +293,8 @@ swgso-tests: load-basic $(RUNTIME_BIN)
 .PHONY: swgso-tests
 
 hostnet-tests: load-basic $(RUNTIME_BIN)
-	@$(call install_runtime,$(RUNTIME),--network=host)
-	@$(call test_runtime,$(RUNTIME),--test_env=CHECKPOINT=false --test_env=HOSTNET=true $(INTEGRATION_TARGETS))
+	@$(call install_runtime,$(RUNTIME),--network=host --net-raw)
+	@$(call test_runtime,$(RUNTIME),--test_env=TEST_CHECKPOINT=false --test_env=TEST_HOSTNET=true --test_env=TEST_NET_RAW=true $(INTEGRATION_TARGETS))
 .PHONY: hostnet-tests
 
 kvm-tests: load-basic $(RUNTIME_BIN)
@@ -311,7 +318,7 @@ iptables-tests: load-iptables $(RUNTIME_BIN)
 	@# FIXME(b/218923513): Need to fix permissions issues.
 	@#$(call test,--test_env=RUNTIME=runc //test/iptables:iptables_test)
 	@$(call install_runtime,$(RUNTIME),--net-raw)
-	@$(call test_runtime,$(RUNTIME),//test/iptables:iptables_test)
+	@$(call test_runtime,$(RUNTIME),--test_env=TEST_NET_RAW=true //test/iptables:iptables_test)
 .PHONY: iptables-tests
 
 packetdrill-tests: load-packetdrill $(RUNTIME_BIN)
@@ -324,6 +331,7 @@ fsstress-test: load-basic $(RUNTIME_BIN)
 	@$(call test_runtime,$(RUNTIME),//test/fsstress:fsstress_test)
 .PHONY: fsstress-test
 
+
 # Specific containerd version tests.
 containerd-test-%: load-basic_alpine load-basic_python load-basic_busybox load-basic_symlink-resolv load-basic_httpd load-basic_ubuntu $(RUNTIME_BIN)
 	@$(call install_runtime,$(RUNTIME),) # Clear flags.
@@ -335,7 +343,6 @@ else
 		sudo tar -C "$$(dirname $$(which containerd))" -zxvf - containerd-shim-runsc-v1
 endif
 	@$(call sudo,test/root:root_test,--runtime=$(RUNTIME) -test.v)
-
 containerd-tests-min: containerd-test-1.4.12
 
 ##

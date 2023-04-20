@@ -33,6 +33,7 @@ import (
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/runsc/cmd/util"
 	"gvisor.dev/gvisor/runsc/config"
+	"gvisor.dev/gvisor/runsc/console"
 	"gvisor.dev/gvisor/runsc/container"
 	"gvisor.dev/gvisor/runsc/flag"
 	"gvisor.dev/gvisor/runsc/specutils"
@@ -145,9 +146,12 @@ func (c *Do) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcommand
 		return util.Errorf("Error to retrieve hostname: %v", err)
 	}
 
-	// If c.overlay is set, then forcefully enable overlay.
-	if overlay2 := conf.GetOverlay2(); c.overlay && !overlay2.Enabled() {
-		conf.Overlay = true
+	// If c.overlay is set, then enable overlay.
+	conf.Overlay = false // conf.Overlay is deprecated.
+	if c.overlay {
+		conf.Overlay2 = config.Overlay2{RootMount: true, SubMounts: true, Medium: "memory"}
+	} else {
+		conf.Overlay2 = config.Overlay2{RootMount: false, SubMounts: false, Medium: ""}
 	}
 	absRoot, err := resolvePath(c.root)
 	if err != nil {
@@ -167,6 +171,7 @@ func (c *Do) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcommand
 			Args:         f.Args(),
 			Env:          os.Environ(),
 			Capabilities: specutils.AllCapabilities(),
+			Terminal:     console.IsPty(os.Stdin.Fd()),
 		},
 		Hostname: hostname,
 	}
@@ -445,7 +450,7 @@ func startContainerAndWait(spec *specs.Spec, conf *config.Config, cid string, wa
 	//
 	// N.B. There is a still a window before this where a signal may kill
 	// this process, skipping cleanup.
-	stopForwarding := ct.ForwardSignals(0 /* pid */, false /* fgProcess */)
+	stopForwarding := ct.ForwardSignals(0 /* pid */, spec.Process.Terminal /* fgProcess */)
 	defer stopForwarding()
 
 	ws, err := ct.Wait()
