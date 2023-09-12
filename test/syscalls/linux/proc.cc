@@ -50,6 +50,8 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "absl/algorithm/container.h"
+#include "absl/container/btree_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/container/node_hash_set.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
@@ -1168,7 +1170,7 @@ static void CheckFdDirGetdentsDuplicates(const std::string& path) {
   EXPECT_GE(newfd, 1024);
   auto fd_closer = Cleanup([newfd]() { close(newfd); });
   auto fd_files = ASSERT_NO_ERRNO_AND_VALUE(ListDir(path.c_str(), false));
-  absl::node_hash_set<std::string> fd_files_dedup(fd_files.begin(),
+  absl::flat_hash_set<std::string> fd_files_dedup(fd_files.begin(),
                                                   fd_files.end());
   EXPECT_EQ(fd_files.size(), fd_files_dedup.size());
 }
@@ -1659,9 +1661,9 @@ PosixErrorOr<std::string> ThreadName() {
 
 // Parses the contents of a /proc/[pid]/status file into a collection of
 // key-value pairs.
-PosixErrorOr<std::map<std::string, std::string>> ParseProcStatus(
+PosixErrorOr<absl::btree_map<std::string, std::string>> ParseProcStatus(
     absl::string_view status_str) {
-  std::map<std::string, std::string> fields;
+  absl::btree_map<std::string, std::string> fields;
   for (absl::string_view const line :
        absl::StrSplit(status_str, '\n', absl::SkipWhitespace())) {
     const std::pair<absl::string_view, absl::string_view> kv =
@@ -2388,6 +2390,38 @@ TEST(ProcTask, VerifyTaskDir) {
       DirContains(absl::StrCat("/proc/self/task/", getpid()), {}, {"task"}));
 }
 
+TEST(ProcTask, VerifyTaskChildren) {
+  auto path = JoinPath("/proc", absl::StrCat(getpid()), "task",
+                       absl::StrCat(gettid()), "children");
+  EXPECT_THAT(access(path.c_str(), F_OK), SyscallSucceeds());
+
+  int pid1 = -1, status1 = -1;
+  auto cleanup1 =
+      ForkAndExec("/bin/sleep", {"sleep", "100"}, {}, nullptr, &pid1, &status1);
+  ASSERT_GT(pid1, 0);
+  ASSERT_EQ(status1, 0);
+
+  auto proc_children_file = ASSERT_NO_ERRNO_AND_VALUE(GetContents(path));
+  EXPECT_EQ(absl::StrCat(pid1, " "), proc_children_file);
+
+  int pid2 = -1, status2 = -1;
+  auto cleanup2 =
+      ForkAndExec("/bin/sleep", {"sleep", "100"}, {}, nullptr, &pid2, &status2);
+  ASSERT_GT(pid2, 0);
+  ASSERT_EQ(status2, 0);
+
+  proc_children_file = ASSERT_NO_ERRNO_AND_VALUE(GetContents(path));
+
+  // /children contains space-separated sorted list of thread Ids of children.
+  std::string expectedContent;
+  if (pid1 < pid2) {
+    expectedContent = absl::StrCat(pid1, " ", pid2, " ");
+  } else {
+    expectedContent = absl::StrCat(pid2, " ", pid1, " ");
+  }
+  EXPECT_EQ(expectedContent, proc_children_file);
+}
+
 TEST(ProcTask, TaskDirCannotBeDeleted) {
   // Drop capabilities that allow us to override file and directory permissions.
   AutoCapability cap(CAP_DAC_OVERRIDE, false);
@@ -2672,7 +2706,7 @@ void CheckDuplicatesRecursively(std::string path) {
       return;
     }
     auto dir_closer = Cleanup([&dir]() { closedir(dir); });
-    absl::node_hash_set<std::string> children;
+    absl::flat_hash_set<std::string> children;
     while (true) {
       // Readdir(3): If the end of the directory stream is reached, NULL is
       // returned and errno is not changed.  If an error occurs, NULL is
@@ -2857,6 +2891,15 @@ TEST(Proc, RegressionTestB236035339) {
   const auto path = JoinPath("/proc/self/fd/", absl::StrCat(efd.get()));
   EXPECT_THAT(open(path.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECTORY),
               SyscallFailsWithErrno(ENOTDIR));
+}
+
+TEST(ProcFilesystems, ReadCapLastCap) {
+  std::string lastCapStr =
+      ASSERT_NO_ERRNO_AND_VALUE(GetContents("/proc/sys/kernel/cap_last_cap"));
+
+  uint64_t lastCap;
+  ASSERT_TRUE(absl::SimpleAtoi(lastCapStr, &lastCap));
+  EXPECT_TRUE(lastCap > 32 && lastCap < 64);
 }
 
 }  // namespace

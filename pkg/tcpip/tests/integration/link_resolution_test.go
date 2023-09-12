@@ -24,7 +24,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"gvisor.dev/gvisor/pkg/bufferv2"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/checker"
@@ -457,10 +457,10 @@ func TestForwardingWithLinkResolutionFailure(t *testing.T) {
 		if got := tcpip.LinkAddress(rep.HardwareAddressSender()); got != outgoingLinkAddr {
 			t.Errorf("got HardwareAddressSender = %s, want = %s", got, outgoingLinkAddr)
 		}
-		if got := tcpip.Address(rep.ProtocolAddressSender()); got != src {
+		if got := tcpip.AddrFromSlice(rep.ProtocolAddressSender()); got != src {
 			t.Errorf("got ProtocolAddressSender = %s, want = %s", got, src)
 		}
-		if got := tcpip.Address(rep.ProtocolAddressTarget()); got != dst {
+		if got := tcpip.AddrFromSlice(rep.ProtocolAddressTarget()); got != dst {
 			t.Errorf("got ProtocolAddressTarget = %s, want = %s", got, dst)
 		}
 	}
@@ -486,7 +486,7 @@ func TestForwardingWithLinkResolutionFailure(t *testing.T) {
 			))
 	}
 
-	icmpv4Checker := func(t *testing.T, v *bufferv2.View, src, dst tcpip.Address) {
+	icmpv4Checker := func(t *testing.T, v *buffer.View, src, dst tcpip.Address) {
 		checker.IPv4(t, v,
 			checker.SrcAddr(src),
 			checker.DstAddr(dst),
@@ -499,7 +499,7 @@ func TestForwardingWithLinkResolutionFailure(t *testing.T) {
 		)
 	}
 
-	icmpv6Checker := func(t *testing.T, v *bufferv2.View, src, dst tcpip.Address) {
+	icmpv6Checker := func(t *testing.T, v *buffer.View, src, dst tcpip.Address) {
 		checker.IPv6(t, v,
 			checker.SrcAddr(src),
 			checker.DstAddr(dst),
@@ -522,7 +522,7 @@ func TestForwardingWithLinkResolutionFailure(t *testing.T) {
 		transportProtocol            func(*stack.Stack) stack.TransportProtocol
 		rx                           func(*channel.Endpoint, tcpip.Address, tcpip.Address)
 		linkResolutionRequestChecker func(*testing.T, stack.PacketBufferPtr, tcpip.Address, tcpip.Address)
-		icmpReplyChecker             func(*testing.T, *bufferv2.View, tcpip.Address, tcpip.Address)
+		icmpReplyChecker             func(*testing.T, *buffer.View, tcpip.Address, tcpip.Address)
 		mtu                          uint32
 	}{
 		{
@@ -532,11 +532,11 @@ func TestForwardingWithLinkResolutionFailure(t *testing.T) {
 			sourceAddr:             tcptestutil.MustParse4("10.0.0.2"),
 			destAddr:               tcptestutil.MustParse4("11.0.0.2"),
 			incomingAddr: tcpip.AddressWithPrefix{
-				Address:   tcpip.Address(net.ParseIP("10.0.0.1").To4()),
+				Address:   tcpip.AddrFromSlice(net.ParseIP("10.0.0.1").To4()),
 				PrefixLen: 8,
 			},
 			outgoingAddr: tcpip.AddressWithPrefix{
-				Address:   tcpip.Address(net.ParseIP("11.0.0.1").To4()),
+				Address:   tcpip.AddrFromSlice(net.ParseIP("11.0.0.1").To4()),
 				PrefixLen: 8,
 			},
 			transportProtocol:            icmp.NewProtocol4,
@@ -552,11 +552,11 @@ func TestForwardingWithLinkResolutionFailure(t *testing.T) {
 			sourceAddr:             tcptestutil.MustParse6("10::2"),
 			destAddr:               tcptestutil.MustParse6("11::2"),
 			incomingAddr: tcpip.AddressWithPrefix{
-				Address:   tcpip.Address(net.ParseIP("10::1").To16()),
+				Address:   tcpip.AddrFromSlice(net.ParseIP("10::1").To16()),
 				PrefixLen: 64,
 			},
 			outgoingAddr: tcpip.AddressWithPrefix{
-				Address:   tcpip.Address(net.ParseIP("11::1").To16()),
+				Address:   tcpip.AddrFromSlice(net.ParseIP("11::1").To16()),
 				PrefixLen: 64,
 			},
 			transportProtocol:            icmp.NewProtocol6,
@@ -961,7 +961,7 @@ func TestWritePacketsLinkResolution(t *testing.T) {
 				t.Fatalf("serverEP.Bind(%#v): %s", serverAddr, err)
 			}
 
-			r, err := host1Stack.FindRoute(host1NICID, "", test.remoteAddr, test.netProto, false /* multicastLoop */)
+			r, err := host1Stack.FindRoute(host1NICID, tcpip.Address{}, test.remoteAddr, test.netProto, false /* multicastLoop */)
 			if err != nil {
 				t.Fatalf("host1Stack.FindRoute(%d, '', %s, %d, false): %s", host1NICID, test.remoteAddr, test.netProto, err)
 			}
@@ -975,7 +975,7 @@ func TestWritePacketsLinkResolution(t *testing.T) {
 			data := []byte{1, 2}
 			pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 				ReserveHeaderBytes: header.UDPMinimumSize + int(r.MaxHeaderLength()),
-				Payload:            bufferv2.MakeWithData(data),
+				Payload:            buffer.MakeWithData(data),
 			})
 			pkt.TransportProtocolNumber = udp.ProtocolNumber
 			length := uint16(pkt.Data().Size() + header.UDPMinimumSize)
@@ -1337,7 +1337,7 @@ func TestTCPConfirmNeighborReachability(t *testing.T) {
 			// Add a reachable dynamic entry to our neighbor table for the remote.
 			{
 				ch := make(chan stack.LinkResolutionResult, 1)
-				err := host1Stack.GetLinkAddress(utils.Host1NICID, test.neighborAddr, "", test.netProto, func(r stack.LinkResolutionResult) {
+				err := host1Stack.GetLinkAddress(utils.Host1NICID, test.neighborAddr, tcpip.Address{}, test.netProto, func(r stack.LinkResolutionResult) {
 					ch <- r
 				})
 				if _, ok := err.(*tcpip.ErrWouldBlock); !ok {
@@ -1732,7 +1732,7 @@ func TestUpdateCachedNeighborEntry(t *testing.T) {
 	writePacket := func(t *testing.T, r *stack.Route) {
 		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 			ReserveHeaderBytes: header.UDPMinimumSize + int(r.MaxHeaderLength()),
-			Payload:            bufferv2.MakeWithData(d),
+			Payload:            buffer.MakeWithData(d),
 		})
 		if err := r.WritePacket(params, pkt); err != nil {
 			t.Fatalf("WritePacket(...): %s", err)

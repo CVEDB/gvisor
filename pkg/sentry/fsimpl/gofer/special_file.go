@@ -119,7 +119,7 @@ func newSpecialFileFD(h handle, mnt *vfs.Mount, d *dentry, flags uint32) (*speci
 	d.fs.specialFileFDs.PushBack(fd)
 	d.fs.syncMu.Unlock()
 	if fd.vfsfd.IsWritable() && (d.mode.Load()&0111 != 0) {
-		metric.SuspiciousOperationsMetric.Increment("opened_write_execute_file")
+		metric.SuspiciousOperationsMetric.Increment(&metric.SuspiciousOperationsTypeOpenedWriteExecuteFile)
 	}
 	if h.fd >= 0 {
 		fsmetric.GoferOpensHost.Increment()
@@ -485,10 +485,10 @@ func (fd *specialFileFD) InvalidateUnsavable(ctx context.Context) error {
 }
 
 // IncRef implements memmap.File.IncRef.
-func (fd *specialFileFD) IncRef(fr memmap.FileRange) {
+func (fd *specialFileFD) IncRef(fr memmap.FileRange, memCgID uint32) {
 	fd.fileRefsMu.Lock()
 	defer fd.fileRefsMu.Unlock()
-	fd.fileRefs.IncRefAndAccount(fr)
+	fd.fileRefs.IncRefAndAccount(fr, memCgID)
 }
 
 // DecRef implements memmap.File.DecRef.

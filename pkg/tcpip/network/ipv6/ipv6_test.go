@@ -25,7 +25,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"gvisor.dev/gvisor/pkg/bufferv2"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/checker"
@@ -41,14 +41,16 @@ import (
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
-const (
-	addr1 = tcpip.Address("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01")
-	addr2 = tcpip.Address("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02")
+var (
+	addr1 = tcpip.AddrFromSlice([]byte("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"))
+	addr2 = tcpip.AddrFromSlice([]byte("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02"))
 	// The least significant 3 bytes are the same as addr2 so both addr2 and
 	// addr3 will have the same solicited-node address.
-	addr3 = tcpip.Address("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x02")
-	addr4 = tcpip.Address("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x03")
+	addr3 = tcpip.AddrFromSlice([]byte("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x02"))
+	addr4 = tcpip.AddrFromSlice([]byte("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x03"))
+)
 
+const (
 	// Tests use the extension header identifier values as uint8 instead of
 	// header.IPv6ExtensionHeaderIdentifier.
 	hopByHopExtHdrID    = uint8(header.IPv6HopByHopOptionsExtHdrIdentifier)
@@ -95,7 +97,7 @@ func testReceiveICMP(t *testing.T, s *stack.Stack, e *channel.Endpoint, src, dst
 	})
 
 	pktBuf := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: bufferv2.MakeWithData(hdr.View()),
+		Payload: buffer.MakeWithData(hdr.View()),
 	})
 	e.InjectInbound(ProtocolNumber, pktBuf)
 	pktBuf.DecRef()
@@ -155,7 +157,7 @@ func testReceiveUDP(t *testing.T, s *stack.Stack, e *channel.Endpoint, src, dst 
 	})
 
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: bufferv2.MakeWithData(hdr.View()),
+		Payload: buffer.MakeWithData(hdr.View()),
 	})
 	e.InjectInbound(ProtocolNumber, pkt)
 	pkt.DecRef()
@@ -176,7 +178,7 @@ func compareFragments(packets []stack.PacketBufferPtr, sourcePacket stack.Packet
 	defer view.Release()
 	source = append(source, view.AsSlice()...)
 
-	var reassembledPayload bufferv2.Buffer
+	var reassembledPayload buffer.Buffer
 	defer reassembledPayload.Release()
 	for i, fragment := range packets {
 		// Confirm that the packet is valid.
@@ -378,7 +380,7 @@ func TestAddIpv6Address(t *testing.T) {
 		// This test is in response to b/140943433.
 		{
 			"Nil",
-			tcpip.Address([]byte(nil)),
+			tcpip.Address{},
 		},
 		{
 			"ValidUnicast",
@@ -1016,7 +1018,7 @@ func TestReceiveIPv6ExtHdrs(t *testing.T) {
 			}
 
 			pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Payload: bufferv2.MakeWithData(hdr.View()),
+				Payload: buffer.MakeWithData(hdr.View()),
 			})
 			e.InjectInbound(ProtocolNumber, pkt)
 			pkt.DecRef()
@@ -1046,7 +1048,7 @@ func TestReceiveIPv6ExtHdrs(t *testing.T) {
 				}
 				defer p.DecRef()
 
-				// Pack the output packet into a single bufferv2.View as the checkers
+				// Pack the output packet into a single buffer.View as the checkers
 				// assume that.
 				v := p.ToView()
 				defer v.Release()
@@ -1905,8 +1907,8 @@ func TestReceiveIPv6Fragments(t *testing.T) {
 					DstAddr:           f.dstAddr,
 				})
 
-				buf := bufferv2.MakeWithData(hdr.View())
-				buf.Append(bufferv2.NewViewWithData(f.data))
+				buf := buffer.MakeWithData(hdr.View())
+				buf.Append(buffer.NewViewWithData(f.data))
 				pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 					Payload: buf,
 				})
@@ -2042,8 +2044,8 @@ func TestConcurrentFragmentWrites(t *testing.T) {
 						DstAddr:           f.dstAddr,
 					})
 
-					buf := bufferv2.MakeWithData(hdr.View())
-					buf.Append(bufferv2.NewViewWithData(f.data))
+					buf := buffer.MakeWithData(hdr.View())
+					buf.Append(buffer.NewViewWithData(f.data))
 					pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 						Payload: buf,
 					})
@@ -2057,13 +2059,16 @@ func TestConcurrentFragmentWrites(t *testing.T) {
 
 func TestInvalidIPv6Fragments(t *testing.T) {
 	const (
-		addr1     = tcpip.Address("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01")
-		addr2     = tcpip.Address("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02")
 		linkAddr1 = tcpip.LinkAddress("\x0a\x0b\x0c\x0d\x0e\x0e")
 		nicID     = 1
 		hoplimit  = 255
 		ident     = 1
 		data      = "TEST_INVALID_IPV6_FRAGMENTS"
+	)
+
+	var (
+		addr1 = tcpip.AddrFromSlice([]byte("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"))
+		addr2 = tcpip.AddrFromSlice([]byte("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02"))
 	)
 
 	type fragmentData struct {
@@ -2168,7 +2173,7 @@ func TestInvalidIPv6Fragments(t *testing.T) {
 				encodeArgs.ExtensionHeaders = append(encodeArgs.ExtensionHeaders, &f.ipv6FragmentFields)
 				ip.Encode(&encodeArgs)
 
-				buf := bufferv2.MakeWithData(append(hdr.View(), f.payload...))
+				buf := buffer.MakeWithData(append(hdr.View(), f.payload...))
 				pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 					Payload: buf,
 				})
@@ -2221,13 +2226,15 @@ func TestInvalidIPv6Fragments(t *testing.T) {
 
 func TestFragmentReassemblyTimeout(t *testing.T) {
 	const (
-		addr1     = tcpip.Address("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01")
-		addr2     = tcpip.Address("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02")
 		linkAddr1 = tcpip.LinkAddress("\x0a\x0b\x0c\x0d\x0e\x0e")
 		nicID     = 1
 		hoplimit  = 255
 		ident     = 1
 		data      = "TEST_FRAGMENT_REASSEMBLY_TIMEOUT"
+	)
+	var (
+		addr1 = tcpip.AddrFromSlice([]byte("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"))
+		addr2 = tcpip.AddrFromSlice([]byte("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02"))
 	)
 
 	type fragmentData struct {
@@ -2427,7 +2434,7 @@ func TestFragmentReassemblyTimeout(t *testing.T) {
 
 				fragHDR := header.IPv6Fragment(hdr.View()[header.IPv6MinimumSize:])
 
-				buf := bufferv2.MakeWithData(append(hdr.View(), f.payload...))
+				buf := buffer.MakeWithData(append(hdr.View(), f.payload...))
 				pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 					Payload: buf,
 				})
@@ -2593,7 +2600,7 @@ func TestWriteStats(t *testing.T) {
 			for i := 0; i < nPackets; i++ {
 				pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 					ReserveHeaderBytes: header.UDPMinimumSize + int(rt.MaxHeaderLength()),
-					Payload:            bufferv2.Buffer{},
+					Payload:            buffer.Buffer{},
 				})
 				defer pkt.DecRef()
 				pkt.TransportHeader().Push(header.UDPMinimumSize)
@@ -2624,9 +2631,9 @@ func buildRoute(t *testing.T, c testContext, ep stack.LinkEndpoint) *stack.Route
 	if err := s.CreateNIC(1, ep); err != nil {
 		t.Fatalf("CreateNIC(1, _) failed: %s", err)
 	}
-	const (
-		src = tcpip.Address("\xfc\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01")
-		dst = tcpip.Address("\xfc\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02")
+	var (
+		src = tcpip.AddrFromSlice([]byte("\xfc\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"))
+		dst = tcpip.AddrFromSlice([]byte("\xfc\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02"))
 	)
 	protocolAddr := tcpip.ProtocolAddress{
 		Protocol:          ProtocolNumber,
@@ -2636,7 +2643,7 @@ func buildRoute(t *testing.T, c testContext, ep stack.LinkEndpoint) *stack.Route
 		t.Fatalf("AddProtocolAddress(%d, %+v, {}): %s", 1, protocolAddr, err)
 	}
 	{
-		mask := tcpip.AddressMask("\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff")
+		mask := tcpip.MaskFrom("\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff")
 		subnet, err := tcpip.NewSubnet(dst, mask)
 		if err != nil {
 			t.Fatalf("NewSubnet(%s, %s) failed: %v", dst, mask, err)
@@ -2931,21 +2938,21 @@ const (
 
 var (
 	incomingIPv6Addr = tcpip.AddressWithPrefix{
-		Address:   tcpip.Address(net.ParseIP("10::1").To16()),
+		Address:   tcpip.AddrFromSlice(net.ParseIP("10::1").To16()),
 		PrefixLen: 64,
 	}
 	outgoingIPv6Addr = tcpip.AddressWithPrefix{
-		Address:   tcpip.Address(net.ParseIP("11::1").To16()),
+		Address:   tcpip.AddrFromSlice(net.ParseIP("11::1").To16()),
 		PrefixLen: 64,
 	}
 	multicastIPv6Addr = tcpip.AddressWithPrefix{
-		Address:   tcpip.Address(net.ParseIP("ff00::").To16()),
+		Address:   tcpip.AddrFromSlice(net.ParseIP("ff00::").To16()),
 		PrefixLen: 64,
 	}
-	remoteIPv6Addr1        = tcpip.Address(net.ParseIP("10::2").To16())
-	remoteIPv6Addr2        = tcpip.Address(net.ParseIP("11::2").To16())
-	unreachableIPv6Addr    = tcpip.Address(net.ParseIP("12::2").To16())
-	linkLocalIPv6Addr      = tcpip.Address(net.ParseIP("fe80::").To16())
+	remoteIPv6Addr1        = tcpip.AddrFromSlice(net.ParseIP("10::2").To16())
+	remoteIPv6Addr2        = tcpip.AddrFromSlice(net.ParseIP("11::2").To16())
+	unreachableIPv6Addr    = tcpip.AddrFromSlice(net.ParseIP("12::2").To16())
+	linkLocalIPv6Addr      = tcpip.AddrFromSlice(net.ParseIP("fe80::").To16())
 	defaultEndpointConfigs = map[tcpip.NICID]tcpip.AddressWithPrefix{
 		incomingNICID: incomingIPv6Addr,
 		outgoingNICID: outgoingIPv6Addr,
@@ -3264,7 +3271,7 @@ func TestForwarding(t *testing.T) {
 				DstAddr:           test.dstAddr,
 			})
 			request := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Payload: bufferv2.MakeWithData(hdr.View()),
+				Payload: buffer.MakeWithData(hdr.View()),
 			})
 
 			incomingEndpoint, ok := endpoints[incomingNICID]
@@ -3599,7 +3606,7 @@ func TestMulticastForwarding(t *testing.T) {
 				DstAddr:           dstAddr,
 			})
 			request := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Payload: bufferv2.MakeWithData(hdr.View()),
+				Payload: buffer.MakeWithData(hdr.View()),
 			})
 
 			incomingEndpoint, ok := endpoints[incomingNICID]
@@ -3731,14 +3738,14 @@ func TestIcmpRateLimit(t *testing.T) {
 		host1IPv6Addr = tcpip.ProtocolAddress{
 			Protocol: ProtocolNumber,
 			AddressWithPrefix: tcpip.AddressWithPrefix{
-				Address:   tcpip.Address(net.ParseIP("10::1").To16()),
+				Address:   tcpip.AddrFromSlice(net.ParseIP("10::1").To16()),
 				PrefixLen: 64,
 			},
 		}
 		host2IPv6Addr = tcpip.ProtocolAddress{
 			Protocol: ProtocolNumber,
 			AddressWithPrefix: tcpip.AddressWithPrefix{
-				Address:   tcpip.Address(net.ParseIP("10::2").To16()),
+				Address:   tcpip.AddrFromSlice(net.ParseIP("10::2").To16()),
 				PrefixLen: 64,
 			},
 		}
@@ -3872,11 +3879,116 @@ func TestIcmpRateLimit(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			for round := 0; round < icmpBurst+1; round++ {
 				pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-					Payload: bufferv2.MakeWithData(testCase.createPacket()),
+					Payload: buffer.MakeWithData(testCase.createPacket()),
 				})
 				e.InjectInbound(header.IPv6ProtocolNumber, pkt)
 				pkt.DecRef()
 				testCase.check(t, e, round)
+			}
+		})
+	}
+}
+
+// TestRejectMartianMappedPackets tests that IPv6 endpoints reject packets
+// containing IPv4-mapped IPv6 addresses.
+func TestRejectMartianMappedPackets(t *testing.T) {
+	tcs := []struct {
+		name            string
+		wantSrcReceived uint64
+		wantDstReceived uint64
+		wantDelivered   uint64
+		srcAddr         tcpip.Address
+		dstAddr         tcpip.Address
+	}{
+		{
+			name:            "bad source",
+			wantSrcReceived: 1,
+			srcAddr:         testutil.MustParse6("::ffff:1.2.3.4"),
+			dstAddr:         testutil.MustParse6("fe80::2"),
+		},
+		{
+			name:            "bad destination",
+			wantDstReceived: 1,
+			srcAddr:         testutil.MustParse6("fe80::2"),
+			dstAddr:         testutil.MustParse6("::ffff:1.2.3.4"),
+		},
+		{
+			name:            "bad source and destination",
+			wantSrcReceived: 1,
+			wantDstReceived: 1,
+			srcAddr:         testutil.MustParse6("::ffff:1.2.3.4"),
+			dstAddr:         testutil.MustParse6("::ffff:5.6.7.8"),
+		},
+		{
+			name:          "valid source and destination",
+			wantDelivered: 1,
+			srcAddr:       testutil.MustParse6("fe80::2"),
+			dstAddr:       header.IPv6AllNodesMulticastAddress,
+		},
+	}
+
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
+			// Initialize the stack and add an address.
+			ctx := newTestContext()
+			defer ctx.cleanup()
+			stk := ctx.s
+
+			channelEP := channel.New(1, header.IPv6MinimumMTU, linkAddr1)
+			defer channelEP.Close()
+			if err := stk.CreateNIC(nicID, channelEP); err != nil {
+				t.Fatalf("CreateNIC(%d, _) = %s", nicID, err)
+			}
+
+			stk.SetRouteTable([]tcpip.Route{
+				{
+					Destination: header.IPv6EmptySubnet,
+					NIC:         nicID,
+				},
+			})
+
+			protocolAddr := tcpip.ProtocolAddress{
+				Protocol:          ProtocolNumber,
+				AddressWithPrefix: addr2.WithPrefix(),
+			}
+			if err := stk.AddProtocolAddress(nicID, protocolAddr, stack.AddressProperties{}); err != nil {
+				t.Fatalf("AddProtocolAddress(%d, %+v, {}): %s", nicID, protocolAddr, err)
+			}
+
+			// We don't have to setup the UDP header properly, as
+			// it should be rejected at the IP layer.
+			hdr := prependable.New(header.IPv6MinimumSize + header.UDPMinimumSize)
+			_ = header.UDP(hdr.Prepend(header.UDPMinimumSize))
+
+			payloadLength := hdr.UsedLength()
+			ip := header.IPv6(hdr.Prepend(header.IPv6MinimumSize))
+			ip.Encode(&header.IPv6Fields{
+				PayloadLength:     uint16(payloadLength),
+				TransportProtocol: udp.ProtocolNumber,
+				HopLimit:          255,
+				SrcAddr:           tc.srcAddr,
+				DstAddr:           tc.dstAddr,
+			})
+
+			// Send the packet out.
+			pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+				Payload: buffer.MakeWithData(hdr.View()),
+			})
+			channelEP.InjectInbound(ProtocolNumber, pkt)
+			pkt.DecRef()
+
+			// Verify that stat counters are appropriately updated.
+			srcStat := stk.Stats().IP.InvalidSourceAddressesReceived
+			if got := srcStat.Value(); got != tc.wantSrcReceived {
+				t.Errorf("got InvalidSourceAddressesReceived = %d, want = %d", got, tc.wantSrcReceived)
+			}
+			dstStat := stk.Stats().IP.InvalidDestinationAddressesReceived
+			if got := dstStat.Value(); got != tc.wantDstReceived {
+				t.Errorf("got InvalidDestinationAddressesReceived = %d, want = %d", got, tc.wantDstReceived)
+			}
+			deliveredStat := stk.Stats().IP.PacketsDelivered
+			if got := deliveredStat.Value(); got != tc.wantDelivered {
+				t.Errorf("got PacketsDelivered = %d, want = %d", got, tc.wantDelivered)
 			}
 		})
 	}

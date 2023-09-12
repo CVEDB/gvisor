@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"gvisor.dev/gvisor/pkg/bufferv2"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/rand"
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/sync"
@@ -2099,7 +2099,8 @@ func TestOutOfOrderFlood(t *testing.T) {
 	ept := endpointTester{c.EP}
 	ept.CheckReadError(t, &tcpip.ErrWouldBlock{})
 
-	// Send 100 packets before the actual one that is expected.
+	// Send 100 packets with seqnum iss + 6 before the actual one that is
+	// expected.
 	data := []byte{1, 2, 3, 4, 5, 6}
 	iss := seqnum.Value(context.TestInitialSequenceNumber).Add(1)
 	for i := 0; i < 100; i++ {
@@ -2123,8 +2124,11 @@ func TestOutOfOrderFlood(t *testing.T) {
 		)
 	}
 
-	// Send packet with seqnum as initial + 3. It must be discarded because the
-	// out-of-order buffer was filled by the previous packets.
+	// Send packet with seqnum as initial + 3. It won't be discarded
+	// because the receive window limits the sender to rcvBufSize/2 bytes,
+	// but we allow (3/4)*rcvBufSize to be used for out-of-order bytes. So
+	// the sender hasn't filled the buffer and we still have space to
+	// receive it.
 	c.SendPacket(data[3:], &context.Headers{
 		SrcPort: context.TestPort,
 		DstPort: c.Port,
@@ -2154,13 +2158,13 @@ func TestOutOfOrderFlood(t *testing.T) {
 		RcvWnd:  30000,
 	})
 
-	// Check that only packet with initial sequence number is acknowledged.
+	// Check that all packets are acknowledged.
 	v = c.GetPacket()
 	defer v.Release()
 	checker.IPv4(t, v, checker.TCP(
 		checker.DstPort(context.TestPort),
 		checker.TCPSeqNum(uint32(c.IRS)+1),
-		checker.TCPAckNum(uint32(iss)+3),
+		checker.TCPAckNum(uint32(iss)+9),
 		checker.TCPFlags(header.TCPFlagAck),
 	),
 	)
@@ -2446,8 +2450,8 @@ func TestSmallReceiveBufferReadiness(t *testing.T) {
 	protocolAddr := tcpip.ProtocolAddress{
 		Protocol: ipv4.ProtocolNumber,
 		AddressWithPrefix: tcpip.AddressWithPrefix{
-			Address:   tcpip.Address("\x7f\x00\x00\x01"),
-			PrefixLen: 8,
+			Address:   tcpip.AddrFromSlice([]byte("\x7f\x00\x00\x01")),
+			PrefixLen: 32,
 		},
 	}
 	if err := s.AddProtocolAddress(nicID, protocolAddr, stack.AddressProperties{}); err != nil {
@@ -2455,7 +2459,7 @@ func TestSmallReceiveBufferReadiness(t *testing.T) {
 	}
 
 	{
-		subnet, err := tcpip.NewSubnet("\x7f\x00\x00\x00", "\xff\x00\x00\x00")
+		subnet, err := tcpip.NewSubnet(tcpip.AddrFromSlice([]byte("\x7f\x00\x00\x00")), tcpip.MaskFrom("\xff\x00\x00\x00"))
 		if err != nil {
 			t.Fatalf("tcpip.NewSubnet failed: %s", err)
 		}
@@ -4173,7 +4177,14 @@ func TestMaxRTO(t *testing.T) {
 			checker.TCPFlagsMatch(header.TCPFlagAck, ^header.TCPFlagPsh),
 		))
 		if elapsed := time.Since(start); elapsed.Round(time.Second).Seconds() != rto.Seconds() {
-			t.Errorf("Retransmit interval not capped to MaxRTO(%s). %s", rto, elapsed)
+			newRto := float64(rto / time.Millisecond)
+			if i == 0 {
+				newRto /= 2
+			}
+			curRto := float64(elapsed.Round(time.Millisecond).Milliseconds())
+			if math.Abs(newRto-curRto) > 10 {
+				t.Errorf("Retransmit interval not capped to RTO(%v). %v", newRto, curRto)
+			}
 		}
 	}
 }
@@ -4911,7 +4922,7 @@ func TestReceivedInvalidSegmentCountIncrement(t *testing.T) {
 	tcpbuf := buf.Flatten()
 	tcpbuf[header.IPv4MinimumSize+header.TCPDataOffset] = ((header.TCPMinimumSize - 1) / 4) << 4
 
-	segbuf := bufferv2.MakeWithData(tcpbuf)
+	segbuf := buffer.MakeWithData(tcpbuf)
 	c.SendSegment(segbuf)
 
 	if got := stats.TCP.InvalidSegmentsReceived.Value(); got != want {
@@ -4943,9 +4954,9 @@ func TestReceivedIncorrectChecksumIncrement(t *testing.T) {
 	// verification to fail.
 	tcpbuf[header.IPv4MinimumSize+((tcpbuf[header.IPv4MinimumSize+header.TCPDataOffset]>>4)*4)] = 0x4
 
-	segbuf := bufferv2.MakeWithData(tcpbuf)
+	segbuf := buffer.MakeWithData(tcpbuf)
 	defer segbuf.Release()
-	c.SendSegment(bufferv2.MakeWithData(tcpbuf))
+	c.SendSegment(buffer.MakeWithData(tcpbuf))
 
 	if got := stats.TCP.ChecksumErrors.Value(); got != want {
 		t.Errorf("got stats.TCP.ChecksumErrors.Value() = %d, want = %d", got, want)
@@ -5560,12 +5571,12 @@ func TestConnectAvoidsBoundPorts(t *testing.T) {
 		switch addressType {
 		case "v4":
 			if isAny {
-				return ""
+				return tcpip.Address{}
 			}
 			return context.StackAddr
 		case "v6":
 			if isAny {
-				return ""
+				return tcpip.Address{}
 			}
 			return context.StackV6Addr
 		case "mapped":
@@ -5716,8 +5727,8 @@ func TestPathMTUDiscovery(t *testing.T) {
 		t.Fatalf("Write failed: %s", err)
 	}
 
-	receivePackets := func(c *context.Context, sizes []int, which int, seqNum uint32) *bufferv2.View {
-		var ret *bufferv2.View
+	receivePackets := func(c *context.Context, sizes []int, which int, seqNum uint32) *buffer.View {
+		var ret *buffer.View
 		iss := seqnum.Value(context.TestInitialSequenceNumber).Add(1)
 		for i, size := range sizes {
 			p := c.GetPacket()
@@ -5748,7 +5759,7 @@ func TestPathMTUDiscovery(t *testing.T) {
 	// Send "packet too big" messages back to netstack.
 	const newMTU = 1200
 	const newMaxPayload = newMTU - header.IPv4MinimumSize - header.TCPMinimumSize
-	mtu := bufferv2.NewViewWithData([]byte{0, 0, newMTU / 256, newMTU % 256})
+	mtu := buffer.NewViewWithData([]byte{0, 0, newMTU / 256, newMTU % 256})
 	defer mtu.Release()
 	c.SendICMPPacket(header.ICMPv4DstUnreachable, header.ICMPv4FragmentationNeeded, mtu, first, newMTU)
 

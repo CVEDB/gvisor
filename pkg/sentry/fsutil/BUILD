@@ -1,9 +1,24 @@
 load("//tools:defs.bzl", "go_library", "go_test")
 load("//tools/go_generics:defs.bzl", "go_template_instance")
+load("//pkg/sync/locking:locking.bzl", "declare_mutex")
 
 package(
     default_applicable_licenses = ["//:license"],
     licenses = ["notice"],
+)
+
+declare_mutex(
+    name = "refs_mutex",
+    out = "refs_mutex.go",
+    package = "fsutil",
+    prefix = "refs",
+)
+
+declare_mutex(
+    name = "maps_mutex",
+    out = "maps_mutex.go",
+    package = "fsutil",
+    prefix = "maps",
 )
 
 go_template_instance(
@@ -35,7 +50,7 @@ go_template_instance(
     types = {
         "Key": "uint64",
         "Range": "memmap.FileRange",
-        "Value": "uint64",
+        "Value": "FrameRefSegInfo",
         "Functions": "FrameRefSetFunctions",
     },
 )
@@ -70,6 +85,8 @@ go_library(
         "host_file_mapper.go",
         "host_file_mapper_state.go",
         "host_file_mapper_unsafe.go",
+        "maps_mutex.go",
+        "refs_mutex.go",
     ],
     visibility = ["//pkg/sentry:internal"],
     deps = [
@@ -80,14 +97,13 @@ go_library(
         "//pkg/log",
         "//pkg/safemem",
         "//pkg/sentry/arch",
-        "//pkg/sentry/device",
         "//pkg/sentry/kernel/time",
         "//pkg/sentry/memmap",
         "//pkg/sentry/pgalloc",
-        "//pkg/sentry/socket/unix/transport",
         "//pkg/sentry/usage",
         "//pkg/state",
         "//pkg/sync",
+        "//pkg/sync/locking",
         "//pkg/usermem",
         "//pkg/waiter",
         "@org_golang_x_sys//unix:go_default_library",

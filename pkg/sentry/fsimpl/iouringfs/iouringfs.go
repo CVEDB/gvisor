@@ -124,8 +124,8 @@ func New(ctx context.Context, vfsObj *vfs.VirtualFilesystem, entries uint32, par
 	ringsBufferSize = uint64(hostarch.Addr(ringsBufferSize).MustRoundUp())
 
 	mf := mfp.MemoryFile()
-
-	rbfr, err := mf.Allocate(ringsBufferSize, pgalloc.AllocOpts{Kind: usage.Anonymous})
+	memCgID := pgalloc.MemoryCgroupIDFromContext(ctx)
+	rbfr, err := mf.Allocate(ringsBufferSize, pgalloc.AllocOpts{Kind: usage.Anonymous, MemCgID: memCgID})
 	if err != nil {
 		return nil, linuxerr.ENOMEM
 	}
@@ -133,7 +133,7 @@ func New(ctx context.Context, vfsObj *vfs.VirtualFilesystem, entries uint32, par
 	// Allocate enough space to store the given number of submission queue entries.
 	sqEntriesSize := uint64(numSqEntries * uint32((*linux.IOUringSqe)(nil).SizeBytes()))
 	sqEntriesSize = uint64(hostarch.Addr(sqEntriesSize).MustRoundUp())
-	sqefr, err := mf.Allocate(sqEntriesSize, pgalloc.AllocOpts{Kind: usage.Anonymous})
+	sqefr, err := mf.Allocate(sqEntriesSize, pgalloc.AllocOpts{Kind: usage.Anonymous, MemCgID: memCgID})
 	if err != nil {
 		return nil, linuxerr.ENOMEM
 	}
@@ -498,10 +498,6 @@ func (fd *FileDescription) handleReadv(t *kernel.Task, sqe *linux.IOUringSqe, fl
 	}
 	// ioprio should not be set for the READV operation.
 	if sqe.IoPrio != 0 {
-		return 0, linuxerr.EINVAL
-	}
-	// buf_index should not be set for the READV operation.
-	if sqe.BufIndexOrGroup != 0 {
 		return 0, linuxerr.EINVAL
 	}
 

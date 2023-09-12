@@ -40,6 +40,7 @@ _templates:
       BENCHMARKS_PROJECT: gvisor-benchmarks
       BENCHMARKS_TABLE: benchmarks
       BENCHMARKS_UPLOAD: true
+      BENCHMARKS_PLATFORMS: "kvm systrap"
       BUILDKITE_PIPELINE_INSTALL_RUNTIME: true
     agents:
       <<: *kvm_agents
@@ -58,7 +59,7 @@ _templates:
         ./pkg/tcpip/transport/icmp
         ./pkg/tcpip/transport/tcp
         ./pkg/tcpip/transport/udp
-        ./pkg/bufferv2
+        ./pkg/buffer
         ./pkg/waiter
 env:
   # Force a clean checkout every time to avoid reuse of files between runs.
@@ -238,7 +239,6 @@ steps:
       <<: *kvm_agents
       cgroup: "v2"
       arch: "amd64"
-
   # All system call tests.
   - <<: *common
     label: ":toolbox: System call tests (AMD64)"
@@ -271,7 +271,7 @@ steps:
     # See above: not truly a source test.
     <<: *source_test
     label: ":docker: Docker tests (cgroupv2)"
-    command: make portforward-tests docker-tests
+    command: make docker-tests
     agents:
       <<: *ubuntu_agents
       arch: "amd64"
@@ -282,6 +282,14 @@ steps:
     command: make overlay-tests
     agents:
       <<: *platform_specific_agents
+      <<: *ubuntu_agents
+      arch: "amd64"
+  - <<: *common
+    <<: *source_test
+    <<: *docker
+    label: ":one-does-not-simply: Port-Forward tests"
+    command: make portforward-tests
+    agents:
       <<: *ubuntu_agents
       arch: "amd64"
   - <<: *common
@@ -393,7 +401,9 @@ steps:
   - <<: *common
     <<: *source_test
     label: ":podman: Podman"
-    command: sudo ./test/podman/run.sh
+    commands:
+      - sudo RUNTIME_ARGS=--directfs=false ./test/podman/run.sh
+      - sudo RUNTIME_ARGS=--directfs=true ./test/podman/run.sh
     agents:
       <<: *ubuntu_agents
       cgroup: "v2"
@@ -430,7 +440,7 @@ steps:
   - <<: *common
     <<: *docker
     label: ":php: PHP runtime tests"
-    command: make php8.1.1-runtime-tests
+    command: make php8.1.1-runtime-tests RUNTIME_ARGS=--directfs
     parallelism: 10
     agents:
       <<: *platform_specific_agents
@@ -439,7 +449,7 @@ steps:
   - <<: *common
     <<: *docker
     label: ":java: Java runtime tests"
-    command: make java17-runtime-tests
+    command: make java17-runtime-tests RUNTIME_ARGS=--directfs
     parallelism: 40
     agents:
       <<: *platform_specific_agents
@@ -448,7 +458,7 @@ steps:
   - <<: *common
     <<: *docker
     label: ":golang: Go runtime tests"
-    command: make go1.20-runtime-tests
+    command: make go1.20-runtime-tests RUNTIME_ARGS=--directfs
     parallelism: 10
     agents:
       <<: *platform_specific_agents
@@ -457,7 +467,7 @@ steps:
   - <<: *common
     <<: *docker
     label: ":node: NodeJS runtime tests"
-    command: make nodejs16.13.2-runtime-tests
+    command: make nodejs16.13.2-runtime-tests RUNTIME_ARGS=--directfs
     parallelism: 10
     agents:
       <<: *platform_specific_agents
@@ -466,8 +476,60 @@ steps:
   - <<: *common
     <<: *docker
     label: ":python: Python runtime tests"
-    command: make python3.10.2-runtime-tests
+    command: make python3.10.2-runtime-tests RUNTIME_ARGS=--directfs
     parallelism: 10
+    agents:
+      <<: *platform_specific_agents
+      <<: *ubuntu_agents
+      arch: "amd64"
+
+  # Runtime tests (goferfs). Continuous only.
+  - <<: *common
+    <<: *docker
+    label: ":php: PHP runtime tests (goferfs)"
+    command: make php8.1.1-runtime-tests RUNTIME_ARGS=--directfs=false
+    parallelism: 10
+    if: build.branch == "master"
+    agents:
+      <<: *platform_specific_agents
+      <<: *ubuntu_agents
+      arch: "amd64"
+  - <<: *common
+    <<: *docker
+    label: ":java: Java runtime tests (goferfs)"
+    command: make java17-runtime-tests RUNTIME_ARGS=--directfs=false
+    parallelism: 40
+    if: build.branch == "master"
+    agents:
+      <<: *platform_specific_agents
+      <<: *ubuntu_agents
+      arch: "amd64"
+  - <<: *common
+    <<: *docker
+    label: ":golang: Go runtime tests (goferfs)"
+    command: make go1.20-runtime-tests RUNTIME_ARGS=--directfs=false
+    parallelism: 10
+    if: build.branch == "master"
+    agents:
+      <<: *platform_specific_agents
+      <<: *ubuntu_agents
+      arch: "amd64"
+  - <<: *common
+    <<: *docker
+    label: ":node: NodeJS runtime tests (goferfs)"
+    command: make nodejs16.13.2-runtime-tests RUNTIME_ARGS=--directfs=false
+    parallelism: 10
+    if: build.branch == "master"
+    agents:
+      <<: *platform_specific_agents
+      <<: *ubuntu_agents
+      arch: "amd64"
+  - <<: *common
+    <<: *docker
+    label: ":python: Python runtime tests (goferfs)"
+    command: make python3.10.2-runtime-tests RUNTIME_ARGS=--directfs=false
+    parallelism: 10
+    if: build.branch == "master"
     agents:
       <<: *platform_specific_agents
       <<: *ubuntu_agents
@@ -500,12 +562,18 @@ steps:
   # but for tmpfs mounts, the size can grow to more memory than the machine
   # has available. Fix the runs to 1GB written/read for the benchmark.
   - <<: *benchmarks
-    label: ":floppy_disk: FIO benchmarks (read/write)"
-    command: make -i benchmark-platforms BENCHMARKS_SUITE=fio BENCHMARKS_TARGETS=test/benchmarks/fs:fio_test BENCHMARKS_FILTER=Fio/operation\.[rw][er] BENCHMARKS_OPTIONS=--test.benchtime=1000x
+    label: ":floppy_disk: FIO benchmarks (write :nest_with_eggs:)"
+    command: make -i benchmark-platforms BENCHMARKS_SUITE=fio BENCHMARKS_TARGETS=test/benchmarks/fs:fio_test BENCHMARKS_FILTER='BenchmarkFioWrite' BENCHMARKS_OPTIONS=--test.benchtime=1000x
   # For rand(read|write) fio benchmarks, running 15s does not overwhelm the system for tmpfs mounts.
   - <<: *benchmarks
-    label: ":cd: FIO benchmarks (randread/randwrite)"
-    command: make -i benchmark-platforms BENCHMARKS_SUITE=fio BENCHMARKS_TARGETS=test/benchmarks/fs:fio_test BENCHMARKS_FILTER=Fio/operation\.rand BENCHMARKS_OPTIONS=--test.benchtime=1000x
+    label: ":cd: FIO benchmarks (read :nest_with_eggs:)"
+    command: make -i benchmark-platforms BENCHMARKS_SUITE=fio BENCHMARKS_TARGETS=test/benchmarks/fs:fio_test BENCHMARKS_FILTER='BenchmarkFioRead' BENCHMARKS_OPTIONS=--test.benchtime=1000x
+  - <<: *benchmarks
+    label: ":floppy_disk: FIO benchmarks (randwrte :empty_nest:)"
+    command: make -i benchmark-platforms BENCHMARKS_SUITE=fio BENCHMARKS_TARGETS=test/benchmarks/fs:fio_test BENCHMARKS_FILTER='BenchmarkFioRandWrite' BENCHMARKS_OPTIONS=--test.benchtime=1000x
+  - <<: *benchmarks
+    label: ":cd: FIO benchmarks (randread :empty_nest:)"
+    command: make -i benchmark-platforms BENCHMARKS_SUITE=fio BENCHMARKS_TARGETS=test/benchmarks/fs:fio_test BENCHMARKS_FILTER='BenchmarkFioRandRead' BENCHMARKS_OPTIONS=--test.benchtime=1000x
   - <<: *benchmarks
     label: ":cd: Ruby CI/CD benchmarks"
     command: make -i benchmark-platforms BENCHMARKS_SUITE=fio BENCHMARKS_TARGETS=test/benchmarks/fs:rubydev_test BENCHMARKS_OPTIONS=-test.benchtime=1ns

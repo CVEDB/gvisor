@@ -30,6 +30,7 @@ import (
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/unet"
+	"gvisor.dev/gvisor/runsc/boot"
 	"gvisor.dev/gvisor/runsc/cmd/util"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/flag"
@@ -56,22 +57,39 @@ var goferCaps = &specs.LinuxCapabilities{
 	Permitted: caps,
 }
 
+// goferSyncFDs contains file descriptors that are used for synchronization
+// of the Gofer startup process against other processes.
+type goferSyncFDs struct {
+	// nvproxyFD is a file descriptor that is used to wait until
+	// nvproxy-related setup is done. This setup involves creating mounts in the
+	// Gofer process's mount namespace.
+	// If this is set, this FD is the first that the Gofer waits for.
+	nvproxyFD int
+	// usernsFD is a file descriptor that is used to wait until
+	// user namespace ID mappings are established in the Gofer's userns.
+	// If this is set, this FD is the second that the Gofer waits for.
+	usernsFD int
+	// procMountFD is a file descriptor that has to be closed when the
+	// procfs mount isn't needed anymore. It is read by the procfs unmounter
+	// process.
+	// If this is set, this FD is the last that the Gofer interacts with and
+	// closes.
+	procMountFD int
+}
+
 // Gofer implements subcommands.Command for the "gofer" command, which starts a
 // filesystem gofer.  This command should not be called directly.
 type Gofer struct {
-	bundleDir string
-	ioFDs     intFlags
-	applyCaps bool
-	setUpRoot bool
+	bundleDir      string
+	ioFDs          intFlags
+	applyCaps      bool
+	setUpRoot      bool
+	overlayMediums boot.OverlayMediumFlags
 
-	specFD       int
-	mountsFD     int
-	syncUsernsFD int
-	// procMountSyncFD is a file descriptor that has to be closed when the
-	// procfs mount isn't needed anymore.
-	procMountSyncFD int
-
+	specFD        int
+	mountsFD      int
 	profileFDs    profile.FDArgs
+	syncFDs       goferSyncFDs
 	stopProfiling func()
 }
 
@@ -98,10 +116,12 @@ func (g *Gofer) SetFlags(f *flag.FlagSet) {
 
 	// Open FDs that are donated to the gofer.
 	f.Var(&g.ioFDs, "io-fds", "list of FDs to connect gofer servers. They must follow this order: root first, then mounts as defined in the spec")
+	f.Var(&g.overlayMediums, "overlay-mediums", "information about how the gofer mounts have been overlaid.")
 	f.IntVar(&g.specFD, "spec-fd", -1, "required fd with the container spec")
 	f.IntVar(&g.mountsFD, "mounts-fd", -1, "mountsFD is the file descriptor to write list of mounts after they have been resolved (direct paths, no symlinks).")
-	f.IntVar(&g.syncUsernsFD, "sync-userns-fd", -1, "file descriptor used to synchronize rootless user namespace initialization.")
-	f.IntVar(&g.procMountSyncFD, "proc-mount-sync-fd", -1, "file descriptor that has to be written to when /proc isn't needed anymore and can be unmounted")
+
+	// Add synchronization FD flags.
+	g.syncFDs.setFlags(f)
 
 	// Profiling flags.
 	g.profileFDs.SetFromFlags(f)
@@ -126,60 +146,24 @@ func (g *Gofer) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomm
 		util.Fatalf("reading spec: %v", err)
 	}
 
-	if g.syncUsernsFD >= 0 {
-		f := os.NewFile(uintptr(g.syncUsernsFD), "sync FD")
-		defer f.Close()
-		var b [1]byte
-		if n, err := f.Read(b[:]); n != 0 || err != io.EOF {
-			util.Fatalf("failed to sync: %v: %v", n, err)
-		}
-
-		f.Close()
-		// SETUID changes UID on the current system thread, so we have
-		// to re-execute current binary.
-		runtime.LockOSThread()
-		if _, _, errno := unix.RawSyscall(unix.SYS_SETUID, 0, 0, 0); errno != 0 {
-			util.Fatalf("failed to set UID: %v", errno)
-		}
-		if _, _, errno := unix.RawSyscall(unix.SYS_SETGID, 0, 0, 0); errno != 0 {
-			util.Fatalf("failed to set GID: %v", errno)
-		}
-	}
+	g.syncFDs.syncNVProxy()
+	g.syncFDs.syncUsernsForRootless()
 
 	if g.setUpRoot {
-		if err := setupRootFS(spec, conf); err != nil {
+		if err := g.setupRootFS(spec, conf); err != nil {
 			util.Fatalf("Error setting up root FS: %v", err)
 		}
 		if !conf.TestOnlyAllowRunAsCurrentUserWithoutChroot {
-			// /proc is umounted from a forked process, because the
-			// current one may re-execute itself without capabilities.
-			cmd, w := execProcUmounter()
-			defer cmd.Wait()
-			defer w.Close()
-			if g.procMountSyncFD != -1 {
-				panic("procMountSyncFD is set")
-			}
-			g.procMountSyncFD = int(w.Fd())
-
-			// Clear FD_CLOEXEC. This process may be re-executed. procMountSyncFD
-			// should remain open.
-			if _, _, errno := unix.RawSyscall(unix.SYS_FCNTL, w.Fd(), unix.F_SETFD, 0); errno != 0 {
-				util.Fatalf("error clearing CLOEXEC: %v", errno)
-			}
+			cleanupUnmounter := g.syncFDs.spawnProcUnmounter()
+			defer cleanupUnmounter()
 		}
 	}
 	if g.applyCaps {
-		// Disable caps when calling myself again.
-		// Note: minimal argument handling for the default case to keep it simple.
-		args := os.Args
-		args = append(args, "--apply-caps=false", "--setup-root=false", "--sync-userns-fd=-1", fmt.Sprintf("--proc-mount-sync-fd=%d", g.procMountSyncFD))
+		overrides := g.syncFDs.flags()
+		overrides["apply-caps"] = "false"
+		overrides["setup-root"] = "false"
+		args := prepareArgs(g.Name(), f, overrides)
 		util.Fatalf("setCapsAndCallSelf(%v, %v): %v", args, goferCaps, setCapsAndCallSelf(args, goferCaps))
-		panic("unreachable")
-	}
-
-	if g.syncUsernsFD >= 0 {
-		// syncUsernsFD is set, but runsc hasn't been re-exeuted with a new UID and GID.
-		// We expcec that setCapsAndCallSelfsetCapsAndCallSelf has to be called in this case.
 		panic("unreachable")
 	}
 
@@ -235,10 +219,9 @@ func (g *Gofer) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomm
 	if err := fsgofer.OpenProcSelfFD(); err != nil {
 		util.Fatalf("failed to open /proc/self/fd: %v", err)
 	}
-	if g.procMountSyncFD != -1 {
-		// procfs isn't needed anymore.
-		umountProc(g.procMountSyncFD)
-	}
+
+	// procfs isn't needed anymore.
+	g.syncFDs.unmountProcfs()
 
 	if err := unix.Chroot(root); err != nil {
 		util.Fatalf("failed to chroot to %q: %v", root, err)
@@ -283,13 +266,12 @@ func (g *Gofer) serve(spec *specs.Spec, conf *config.Config, root string) subcom
 		HostFifo:           conf.HostFifo,
 		DonateMountPointFD: conf.DirectFS,
 	})
-	overlay2 := conf.GetOverlay2()
 
 	// Start with root mount, then add any other additional mount as needed.
 	cfgs = append(cfgs, connectionConfig{
 		sock:      newSocket(g.ioFDs[0]),
 		mountPath: "/", // fsgofer process is always chroot()ed. So serve root.
-		readonly:  spec.Root.Readonly || overlay2.RootMount,
+		readonly:  spec.Root.Readonly || g.overlayMediums[0].IsEnabled(),
 	})
 	log.Infof("Serving %q mapped to %q on FD %d (ro: %t)", "/", root, g.ioFDs[0], cfgs[0].readonly)
 
@@ -309,7 +291,7 @@ func (g *Gofer) serve(spec *specs.Spec, conf *config.Config, root string) subcom
 		cfgs = append(cfgs, connectionConfig{
 			sock:      newSocket(g.ioFDs[mountIdx]),
 			mountPath: m.Destination,
-			readonly:  isReadonlyMount(m.Options) || overlay2.SubMounts,
+			readonly:  specutils.IsReadonlyMount(m.Options) || g.overlayMediums[mountIdx].IsEnabled(),
 		})
 
 		log.Infof("Serving %q mapped on FD %d (ro: %t)", m.Destination, g.ioFDs[mountIdx], cfgs[mountIdx].readonly)
@@ -356,16 +338,7 @@ func (g *Gofer) writeMounts(mounts []specs.Mount) error {
 	return nil
 }
 
-func isReadonlyMount(opts []string) bool {
-	for _, o := range opts {
-		if o == "ro" {
-			return true
-		}
-	}
-	return false
-}
-
-func setupRootFS(spec *specs.Spec, conf *config.Config) error {
+func (g *Gofer) setupRootFS(spec *specs.Spec, conf *config.Config) error {
 	// Convert all shared mounts into slaves to be sure that nothing will be
 	// propagated outside of our namespace.
 	procPath := "/proc"
@@ -428,7 +401,7 @@ func setupRootFS(spec *specs.Spec, conf *config.Config) error {
 	}
 
 	// Replace the current spec, with the clean spec with symlinks resolved.
-	if err := setupMounts(conf, spec.Mounts, root, procPath); err != nil {
+	if err := g.setupMounts(conf, spec.Mounts, root, procPath); err != nil {
 		util.Fatalf("error setting up FS: %v", err)
 	}
 
@@ -445,7 +418,7 @@ func setupRootFS(spec *specs.Spec, conf *config.Config) error {
 	}
 
 	// Check if root needs to be remounted as readonly.
-	if spec.Root.Readonly || conf.GetOverlay2().RootMount {
+	if spec.Root.Readonly || g.overlayMediums[0].IsEnabled() {
 		// If root is a mount point but not read-only, we can change mount options
 		// to make it read-only for extra safety.
 		log.Infof("Remounting root as readonly: %q", root)
@@ -469,7 +442,8 @@ func setupRootFS(spec *specs.Spec, conf *config.Config) error {
 // setupMounts bind mounts all mounts specified in the spec in their correct
 // location inside root. It will resolve relative paths and symlinks. It also
 // creates directories as needed.
-func setupMounts(conf *config.Config, mounts []specs.Mount, root, procPath string) error {
+func (g *Gofer) setupMounts(conf *config.Config, mounts []specs.Mount, root, procPath string) error {
+	goferMntIdx := 1 // First index is for rootfs.
 	for _, m := range mounts {
 		if !specutils.IsGoferMount(m) {
 			continue
@@ -481,7 +455,7 @@ func setupMounts(conf *config.Config, mounts []specs.Mount, root, procPath strin
 		}
 
 		flags := specutils.OptionsToFlags(m.Options) | unix.MS_BIND
-		if conf.GetOverlay2().SubMounts {
+		if g.overlayMediums[goferMntIdx].IsEnabled() {
 			// Force mount read-only if writes are not going to be sent to it.
 			flags |= unix.MS_RDONLY
 		}
@@ -498,6 +472,7 @@ func setupMounts(conf *config.Config, mounts []specs.Mount, root, procPath strin
 				return fmt.Errorf("mount dst: %q, flags: %#x, err: %v", dst, flags, err)
 			}
 		}
+		goferMntIdx++
 	}
 	return nil
 }
@@ -602,4 +577,119 @@ func adjustMountOptions(conf *config.Config, path string, opts []string) ([]stri
 		rv = append(rv, "overlayfs_stale_read")
 	}
 	return rv, nil
+}
+
+// setFlags sets sync FD flags on the given FlagSet.
+func (g *goferSyncFDs) setFlags(f *flag.FlagSet) {
+	f.IntVar(&g.nvproxyFD, "sync-nvproxy-fd", -1, "file descriptor that the gofer waits on until nvproxy setup is done")
+	f.IntVar(&g.usernsFD, "sync-userns-fd", -1, "file descriptor the the gofer waits on until userns mappings are set up")
+	f.IntVar(&g.procMountFD, "proc-mount-sync-fd", -1, "file descriptor that the gofer writes to when /proc isn't needed anymore and can be unmounted")
+}
+
+// flags returns the flags necessary to pass along the current sync FD values
+// to a re-executed version of this process.
+func (g *goferSyncFDs) flags() map[string]string {
+	return map[string]string{
+		"sync-nvproxy-fd":    fmt.Sprintf("%d", g.nvproxyFD),
+		"sync-userns-fd":     fmt.Sprintf("%d", g.usernsFD),
+		"proc-mount-sync-fd": fmt.Sprintf("%d", g.procMountFD),
+	}
+}
+
+// waitForFD waits for the other end of a given FD to be closed.
+// `fd` is closed unconditionally after that.
+// This should only be called for actual FDs (i.e. `fd` >= 0).
+func waitForFD(fd int, fdName string) error {
+	log.Debugf("Waiting on %s %d...", fdName, fd)
+	f := os.NewFile(uintptr(fd), fdName)
+	defer f.Close()
+	var b [1]byte
+	if n, err := f.Read(b[:]); n != 0 || err != io.EOF {
+		return fmt.Errorf("failed to sync on %s: %v: %v", fdName, n, err)
+	}
+	log.Debugf("Synced on %s %d.", fdName, fd)
+	return nil
+}
+
+// spawnProcMounter executes the /proc unmounter process.
+// It returns a function to wait on the proc unmounter process, which
+// should be called (via defer) in case of errors in order to clean up the
+// unmounter process properly.
+// When procfs is no longer needed, `unmountProcfs` should be called.
+func (g *goferSyncFDs) spawnProcUnmounter() func() {
+	if g.procMountFD != -1 {
+		util.Fatalf("procMountFD is set")
+	}
+	// /proc is umounted from a forked process, because the
+	// current one may re-execute itself without capabilities.
+	cmd, w := execProcUmounter()
+	// Clear FD_CLOEXEC. This process may be re-executed. procMountFD
+	// should remain open.
+	if _, _, errno := unix.RawSyscall(unix.SYS_FCNTL, w.Fd(), unix.F_SETFD, 0); errno != 0 {
+		util.Fatalf("error clearing CLOEXEC: %v", errno)
+	}
+	g.procMountFD = int(w.Fd())
+	return func() {
+		g.procMountFD = -1
+		w.Close()
+		cmd.Wait()
+	}
+}
+
+// unmountProcfs signals the proc unmounter process that procfs is no longer
+// needed.
+func (g *goferSyncFDs) unmountProcfs() {
+	if g.procMountFD < 0 {
+		return
+	}
+	umountProc(g.procMountFD)
+	g.procMountFD = -1
+}
+
+// syncUsernsForRootless waits on usernsFD to be closed and then sets
+// UID/GID to 0. Note that this function calls runtime.LockOSThread().
+// This function is a no-op if usernsFD is -1.
+//
+// Postcondition: All callers must re-exec themselves after this returns,
+// unless usernsFD was -1.
+func (g *goferSyncFDs) syncUsernsForRootless() {
+	if g.usernsFD < 0 {
+		return
+	}
+	syncUsernsForRootless(g.usernsFD)
+	g.usernsFD = -1
+}
+
+// syncUsernsForRootless waits on usernsFD to be closed and then sets
+// UID/GID to 0. Note that this function calls runtime.LockOSThread().
+//
+// Postcondition: All callers must re-exec themselves after this returns.
+func syncUsernsForRootless(fd int) {
+	if err := waitForFD(fd, "userns sync FD"); err != nil {
+		util.Fatalf("failed to sync on userns FD: %v", err)
+	}
+
+	// SETUID changes UID on the current system thread, so we have
+	// to re-execute current binary.
+	runtime.LockOSThread()
+	if _, _, errno := unix.RawSyscall(unix.SYS_SETUID, 0, 0, 0); errno != 0 {
+		util.Fatalf("failed to set UID: %v", errno)
+	}
+	if _, _, errno := unix.RawSyscall(unix.SYS_SETGID, 0, 0, 0); errno != 0 {
+		util.Fatalf("failed to set GID: %v", errno)
+	}
+}
+
+// syncNVProxy waits on nvproxyFD to be closed.
+// Used for synchronization during nvproxy setup which is done from the
+// non-gofer process.
+// This function is a no-op if nvProxySyncFD is -1.
+func (g *goferSyncFDs) syncNVProxy() {
+	if g.nvproxyFD < 0 {
+		return
+	}
+	if err := waitForFD(g.nvproxyFD, "nvproxy sync FD"); err != nil {
+		util.Fatalf("failed to sync on NVProxy FD: %v", err)
+	}
+	g.nvproxyFD = -1
 }

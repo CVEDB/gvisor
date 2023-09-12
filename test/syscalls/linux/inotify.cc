@@ -333,6 +333,9 @@ PosixErrorOr<int> InotifyAddWatch(int fd, const std::string& path,
 }
 
 TEST(Inotify, IllegalSeek) {
+  // TODO: b/298787679 - this test fails on 6.0+ kernels.
+  SKIP_IF(!IsRunningOnGvisor());
+
   const FileDescriptor fd = ASSERT_NO_ERRNO_AND_VALUE(InotifyInit1(0));
   EXPECT_THAT(lseek(fd.get(), 0, SEEK_SET), SyscallFailsWithErrno(ESPIPE));
 }
@@ -374,20 +377,27 @@ TEST(Inotify, NonBlockingReadReturnsEagain) {
 
 TEST(Inotify, AddWatchOnInvalidFdFails) {
   // Garbage fd.
-  EXPECT_THAT(inotify_add_watch(-1, "/tmp", IN_ALL_EVENTS),
-              SyscallFailsWithErrno(EBADF));
-  EXPECT_THAT(inotify_add_watch(1337, "/tmp", IN_ALL_EVENTS),
-              SyscallFailsWithErrno(EBADF));
+  EXPECT_THAT(
+      inotify_add_watch(-1, GetAbsoluteTestTmpdir().c_str(), IN_ALL_EVENTS),
+      SyscallFailsWithErrno(EBADF));
+  EXPECT_THAT(
+      inotify_add_watch(1337, GetAbsoluteTestTmpdir().c_str(), IN_ALL_EVENTS),
+      SyscallFailsWithErrno(EBADF));
 
   // Non-inotify fds.
-  EXPECT_THAT(inotify_add_watch(0, "/tmp", IN_ALL_EVENTS),
-              SyscallFailsWithErrno(EINVAL));
-  EXPECT_THAT(inotify_add_watch(1, "/tmp", IN_ALL_EVENTS),
-              SyscallFailsWithErrno(EINVAL));
-  EXPECT_THAT(inotify_add_watch(2, "/tmp", IN_ALL_EVENTS),
-              SyscallFailsWithErrno(EINVAL));
-  const FileDescriptor fd = ASSERT_NO_ERRNO_AND_VALUE(Open("/tmp", O_RDONLY));
-  EXPECT_THAT(inotify_add_watch(fd.get(), "/tmp", IN_ALL_EVENTS),
+  EXPECT_THAT(
+      inotify_add_watch(0, GetAbsoluteTestTmpdir().c_str(), IN_ALL_EVENTS),
+      SyscallFailsWithErrno(EINVAL));
+  EXPECT_THAT(
+      inotify_add_watch(1, GetAbsoluteTestTmpdir().c_str(), IN_ALL_EVENTS),
+      SyscallFailsWithErrno(EINVAL));
+  EXPECT_THAT(
+      inotify_add_watch(2, GetAbsoluteTestTmpdir().c_str(), IN_ALL_EVENTS),
+      SyscallFailsWithErrno(EINVAL));
+  const FileDescriptor fd = ASSERT_NO_ERRNO_AND_VALUE(
+      Open(GetAbsoluteTestTmpdir().c_str(), O_RDONLY));
+  EXPECT_THAT(inotify_add_watch(fd.get(), GetAbsoluteTestTmpdir().c_str(),
+                                IN_ALL_EVENTS),
               SyscallFailsWithErrno(EINVAL));
 }
 

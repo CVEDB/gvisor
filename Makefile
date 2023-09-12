@@ -136,7 +136,7 @@ endif
 
 # Configure helpers for below.
 configure_noreload = \
-  $(call header,CONFIGURE $(1) → $(RUNTIME_BIN) $(2)); \
+  $(call header,CONFIGURE $(1) → $(RUNTIME_BIN) $(RUNTIME_ARGS) $(2)); \
   sudo $(RUNTIME_BIN) install --experimental=true --runtime="$(1)" -- $(RUNTIME_ARGS) --debug-log "$(RUNTIME_LOGS)" $(2) && \
   sudo rm -rf "$(RUNTIME_LOG_DIR)" && mkdir -p "$(RUNTIME_LOG_DIR)"
 
@@ -205,7 +205,7 @@ nogo-tests:
 # For unit tests, we take everything in the root, pkg/... and tools/..., and
 # pull in all directories in runsc except runsc/container.
 unit-tests: ## Local package unit tests in pkg/..., tools/.., etc.
-	@$(call test,--test_tag_filters=-nogo --test_filter=-//runsc/container/... //:all pkg/... tools/... runsc/... vdso/... test/trace/...)
+	@$(call test,'--test_tag_filters=-nogo,-requires-kvm' //:all pkg/... tools/... runsc/... vdso/... test/trace/...)
 .PHONY: unit-tests
 
 # See unit-tests: this includes runsc/container.
@@ -242,7 +242,7 @@ RUNTIME_TESTS_FLAKY_IS_ERROR ?= true
 RUNTIME_TESTS_FLAKY_SHORT_CIRCUIT ?= true
 
 %-runtime-tests: load-runtimes_% $(RUNTIME_BIN)
-	@$(call install_runtime,$(RUNTIME),--watchdog-action=panic)
+	@$(call install_runtime,$(RUNTIME),--watchdog-action=panic --platform=systrap)
 	@$(call test_runtime,$(RUNTIME),--test_timeout=1800 --test_env=RUNTIME_TESTS_FILTER=$(RUNTIME_TESTS_FILTER) --test_env=RUNTIME_TESTS_PER_TEST_TIMEOUT=$(RUNTIME_TESTS_PER_TEST_TIMEOUT) --test_env=RUNTIME_TESTS_RUNS_PER_TEST=$(RUNTIME_TESTS_RUNS_PER_TEST) --test_env=RUNTIME_TESTS_FLAKY_IS_ERROR=$(RUNTIME_TESTS_FLAKY_IS_ERROR) --test_env=RUNTIME_TESTS_FLAKY_SHORT_CIRCUIT=$(RUNTIME_TESTS_FLAKY_SHORT_CIRCUIT) //test/runtimes:$*)
 
 do-tests: $(RUNTIME_BIN)
@@ -264,9 +264,9 @@ simple-tests: unit-tests # Compatibility target.
 
 portforward-tests: load-basic_redis load-basic_nginx $(RUNTIME_BIN)
 	@$(call install_runtime,$(RUNTIME),--network=sandbox)
-	@$(call sudo,test/root:portforward_test,--runtime=$(RUNTIME) -test.v)
+	@$(call sudo,test/root:portforward_test,--runtime=$(RUNTIME) -test.v $(ARGS))
 	@$(call install_runtime,$(RUNTIME),--network=host)
-	@$(call sudo,test/root:portforward_test,--runtime=$(RUNTIME) -test.v)
+	@$(call sudo,test/root:portforward_test,--runtime=$(RUNTIME) -test.v $(ARGS))
 .PHONY: portforward-test
 
 # Standard integration targets.
@@ -453,7 +453,8 @@ website-build: load-jekyll ## Build the site image locally.
 .PHONY: website-build
 
 website-server: website-build ## Run a local server for development.
-	@docker run -i -p 8080:8080 $(WEBSITE_IMAGE)
+	@# NOTE: When running locally we use the localhost:8080 as custom domain.
+	@docker run -i -p 8080:8080 $(WEBSITE_IMAGE) --custom-domain='*'
 .PHONY: website-server
 
 website-push: website-build ## Push a new image and update the service.

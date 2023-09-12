@@ -8,7 +8,9 @@ package(
 go_binary(
     name = "fuse",
     srcs = ["fuse.go"],
-    visibility = ["//test/runner:__subpackages__"],
+    visibility = [
+        "//visibility:public",
+    ],
     deps = [
         "//pkg/log",
         "//runsc/specutils",

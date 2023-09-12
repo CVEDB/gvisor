@@ -17,6 +17,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -233,8 +235,8 @@ func runRunsc(tc *gtest.TestCase, spec *specs.Spec) error {
 		"-gvisor-gro=200000ns",
 	}
 
-	if *network == "host" && !specutils.HasCapabilities(capability.CAP_NET_RAW) {
-		log.Warningf("Testing with network=host but host does not have CAP_NET_RAW. Raw socket support will be disabled.")
+	if *network == "host" && !testutil.TestEnvSupportsNetAdmin {
+		log.Warningf("Testing with network=host but test environment does not support net admin or raw sockets. Raw sockets will not be enabled.")
 	} else {
 		args = append(args, "-net-raw")
 	}
@@ -271,6 +273,8 @@ func runRunsc(tc *gtest.TestCase, spec *specs.Spec) error {
 	}
 	if *directfs {
 		args = append(args, "-directfs")
+	} else {
+		args = append(args, "-directfs=false")
 	}
 
 	testLogDir := ""
@@ -328,10 +332,17 @@ func runRunsc(tc *gtest.TestCase, spec *specs.Spec) error {
 		if err != nil {
 			return fmt.Errorf("could not read pid file: %v", err)
 		}
-		log.Infof("Sandbox process ID is %s. You can attach to it from a debugger of your choice.", sandboxPidBytes)
-		log.Infof("For example, with Delve you can call: $ dlv attach %s", sandboxPidBytes)
-		log.Infof("The test will automatically start after %s.", *waitForPid)
-		log.Infof("You may also signal the test process to start the test immediately: $ kill -SIGUSR1 %d", os.Getpid())
+		msg := `
+
+		Sandbox is running. You can now attach to it from a debugger of your choice.
+		For example, with Delve you can call: $ dlv attach %s.
+		The test will automatically start after %s.
+		You may also signal the test process to start the test immediately: $ kill -SIGUSR1 %d.
+
+		If you're running a test using Make/docker, you'll have to obtain the runsc and test PIDs manually.
+		To attach run: $ dlv attach $(ps aux | grep -m 1 -e 'runsc-sandbox' | awk '{print $2}')
+		To signal the test process run: $ kill -SIGUSR1 $(ps aux | grep -m 1 -e 'bash.*test/syscalls' | awk '{print $2}')`
+		log.Infof(msg, sandboxPidBytes, *waitForPid, os.Getpid())
 
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, unix.SIGUSR1)
@@ -400,9 +411,21 @@ func runRunsc(tc *gtest.TestCase, spec *specs.Spec) error {
 		waitArgs := append(args, "wait", id)
 		waitCmd := exec.Command(specutils.ExePath, waitArgs...)
 		waitCmd.SysProcAttr = sysProcAttr
-		waitCmd.Stdout = os.Stdout
 		waitCmd.Stderr = os.Stderr
+
+		buf := bytes.NewBuffer(nil)
+		waitCmd.Stdout = buf
 		err = waitCmd.Run()
+		wres := struct {
+			ID         string `json:"id"`
+			ExitStatus int    `json:"exitStatus"`
+		}{}
+		if err := json.NewDecoder(buf).Decode(&wres); err != nil {
+			return fmt.Errorf("could not decode wait result: %v", err)
+		}
+		if wres.ExitStatus != 0 {
+			return fmt.Errorf("test failed with status: %d", wres.ExitStatus)
+		}
 	}
 	if err == nil && len(testLogDir) > 0 {
 		// If the test passed, then we erase the log directory. This speeds up
@@ -515,7 +538,9 @@ func runTestCaseRunsc(testBin string, tc *gtest.TestCase, args []string, t *test
 		if err != nil {
 			fatalf("cannot find fuse: %v", err)
 		}
-		spec = testutil.NewSpecWithArgs(append([]string{fuseServer, testBin}, args...)...)
+		cmdArgs := append([]string{testBin}, args...)
+		cmd := strings.Join(cmdArgs, " ")
+		spec = testutil.NewSpecWithArgs([]string{fuseServer, fmt.Sprintf("--debug=%t", *debug), fmt.Sprintf("--cmd=\"%s\"", cmd)}...)
 	} else {
 		spec = testutil.NewSpecWithArgs(append([]string{testBin}, args...)...)
 	}
@@ -534,7 +559,7 @@ func runTestCaseRunsc(testBin string, tc *gtest.TestCase, args []string, t *test
 			Type:        "tmpfs",
 		})
 	} else {
-		// Use a gofer-backed directory as '/tmp'.
+		// Use a gofer-backed directory for $TEST_TMPDIR.
 		//
 		// Tests might be running in parallel, so make sure each has a
 		// unique test temp dir.
@@ -551,19 +576,9 @@ func runTestCaseRunsc(testBin string, tc *gtest.TestCase, args []string, t *test
 			t.Fatalf("could not chmod temp dir: %v", err)
 		}
 
-		// "/tmp" is not replaced with a tmpfs mount inside the sandbox
-		// when it's not empty. This ensures that testTmpDir uses gofer
-		// in exclusive mode.
 		testTmpDir = tmpDir
-		if *fileAccess == "shared" {
-			// All external mounts except the root mount are shared.
-			spec.Mounts = append(spec.Mounts, specs.Mount{
-				Type:        "bind",
-				Destination: "/tmp",
-				Source:      tmpDir,
-			})
-			testTmpDir = "/tmp"
-		}
+		// Note that tmpDir exists in container rootfs mount, whose cacheability is
+		// set by fileAccess flag appropriately.
 	}
 	if *fusefs {
 		// In fuse tests, the fuse server forwards all filesystem ops from /tmp
@@ -573,19 +588,10 @@ func runTestCaseRunsc(testBin string, tc *gtest.TestCase, args []string, t *test
 			Type:        "tmpfs",
 		})
 	}
-	if *network == "host" {
-		// If host does not have CAP_NET_ADMIN or CAP_NET_RAW, then we
-		// must drop those caps inside the sandbox, since we will not
-		// be able to perform those operations with hostinet.
-		if !specutils.HasCapabilities(capability.CAP_NET_ADMIN) {
-			log.Warningf("Running with network=host, but host does not have CAP_NET_ADMIN. Dropping this capability inside the sandbox.")
-			specutils.DropCapability(spec.Process.Capabilities, "CAP_NET_ADMIN")
-
-		}
-		if !specutils.HasCapabilities(capability.CAP_NET_RAW) {
-			log.Warningf("Running with network=host, but host does not have CAP_NET_RAW. Dropping this capability inside the sandbox.")
-			specutils.DropCapability(spec.Process.Capabilities, "CAP_NET_RAW")
-		}
+	if *network == "host" && !testutil.TestEnvSupportsNetAdmin {
+		log.Warningf("Testing with network=host but test environment does not support net admin or raw sockets. Dropping CAP_NET_ADMIN and CAP_NET_RAW.")
+		specutils.DropCapability(spec.Process.Capabilities, "CAP_NET_ADMIN")
+		specutils.DropCapability(spec.Process.Capabilities, "CAP_NET_RAW")
 	}
 
 	// Set environment variables that indicate we are running in gVisor with
@@ -615,8 +621,7 @@ func runTestCaseRunsc(testBin string, tc *gtest.TestCase, args []string, t *test
 	// interpret them.
 	env = filterEnv(env, []string{"TEST_SHARD_INDEX", "TEST_TOTAL_SHARDS", "GTEST_SHARD_INDEX", "GTEST_TOTAL_SHARDS"})
 
-	// Set TEST_TMPDIR to /tmp, as some of the syscall tests require it to
-	// be backed by tmpfs.
+	// Set TEST_TMPDIR to testTmpDir, which has been appropriately configured.
 	env = filterEnv(env, []string{"TEST_TMPDIR"})
 	env = append(env, fmt.Sprintf("TEST_TMPDIR=%s", testTmpDir))
 

@@ -18,6 +18,7 @@ package netlink
 import (
 	"io"
 	"math"
+	"time"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/abi/linux/errno"
@@ -27,7 +28,6 @@ import (
 	"gvisor.dev/gvisor/pkg/marshal"
 	"gvisor.dev/gvisor/pkg/marshal/primitive"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
-	"gvisor.dev/gvisor/pkg/sentry/device"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	ktime "gvisor.dev/gvisor/pkg/sentry/kernel/time"
@@ -38,7 +38,6 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/syserr"
-	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
@@ -57,9 +56,6 @@ const (
 )
 
 var errNoFilter = syserr.New("no filter attached", errno.ENOENT)
-
-// netlinkSocketDevice is the netlink socket virtual device.
-var netlinkSocketDevice = device.NewAnonDevice()
 
 // Socket is the base socket type for netlink sockets.
 //
@@ -124,7 +120,7 @@ func New(t *kernel.Task, skType linux.SockType, protocol Protocol) (*Socket, *sy
 
 	// Bind the endpoint for good measure so we can connect to it. The
 	// bound address will never be exposed.
-	if err := ep.Bind(tcpip.FullAddress{Addr: "dummy"}); err != nil {
+	if err := ep.Bind(transport.Address{Addr: "dummy"}); err != nil {
 		ep.Close(t)
 		return nil, err
 	}
@@ -392,6 +388,20 @@ func (s *Socket) GetSockOpt(t *kernel.Task, level int, name int, outPtr hostarch
 				passcred = 1
 			}
 			return &passcred, nil
+
+		case linux.SO_SNDTIMEO:
+			if outLen < linux.SizeOfTimeval {
+				return nil, syserr.ErrInvalidArgument
+			}
+			sendTimeout := linux.NsecToTimeval(s.SendTimeout())
+			return &sendTimeout, nil
+
+		case linux.SO_RCVTIMEO:
+			if outLen < linux.SizeOfTimeval {
+				return nil, syserr.ErrInvalidArgument
+			}
+			recvTimeout := linux.NsecToTimeval(s.RecvTimeout())
+			return &recvTimeout, nil
 		}
 	case linux.SOL_NETLINK:
 		switch name {
@@ -476,6 +486,32 @@ func (s *Socket) SetSockOpt(t *kernel.Task, level int, name int, opt []byte) *sy
 				return errNoFilter
 			}
 
+			return nil
+
+		case linux.SO_SNDTIMEO:
+			if len(opt) < linux.SizeOfTimeval {
+				return syserr.ErrInvalidArgument
+			}
+
+			var v linux.Timeval
+			v.UnmarshalBytes(opt)
+			if v.Usec < 0 || v.Usec >= int64(time.Second/time.Microsecond) {
+				return syserr.ErrDomain
+			}
+			s.SetSendTimeout(v.ToNsecCapped())
+			return nil
+
+		case linux.SO_RCVTIMEO:
+			if len(opt) < linux.SizeOfTimeval {
+				return syserr.ErrInvalidArgument
+			}
+
+			var v linux.Timeval
+			v.UnmarshalBytes(opt)
+			if v.Usec < 0 || v.Usec >= int64(time.Second/time.Microsecond) {
+				return syserr.ErrDomain
+			}
+			s.SetRecvTimeout(v.ToNsecCapped())
 			return nil
 		}
 	case linux.SOL_NETLINK:
@@ -629,7 +665,7 @@ func (s *Socket) sendResponse(ctx context.Context, ms *MessageSet) *syserr.Error
 	if len(bufs) > 0 {
 		// RecvMsg never receives the address, so we don't need to send
 		// one.
-		_, notify, err := s.connection.Send(ctx, bufs, cms, tcpip.FullAddress{})
+		_, notify, err := s.connection.Send(ctx, bufs, cms, transport.Address{})
 		// If the buffer is full, we simply drop messages, just like
 		// Linux.
 		if err != nil && err != syserr.ErrWouldBlock {
@@ -656,7 +692,7 @@ func (s *Socket) sendResponse(ctx context.Context, ms *MessageSet) *syserr.Error
 		// Add the dump_done_errno payload.
 		m.Put(primitive.AllocateInt64(0))
 
-		_, notify, err := s.connection.Send(ctx, [][]byte{m.Finalize()}, cms, tcpip.FullAddress{})
+		_, notify, err := s.connection.Send(ctx, [][]byte{m.Finalize()}, cms, transport.Address{})
 		if err != nil && err != syserr.ErrWouldBlock {
 			return err
 		}
@@ -668,7 +704,7 @@ func (s *Socket) sendResponse(ctx context.Context, ms *MessageSet) *syserr.Error
 	return nil
 }
 
-func dumpErrorMesage(hdr linux.NetlinkMessageHeader, ms *MessageSet, err *syserr.Error) {
+func dumpErrorMessage(hdr linux.NetlinkMessageHeader, ms *MessageSet, err *syserr.Error) {
 	m := ms.AddMessage(linux.NetlinkMessageHeader{
 		Type: linux.NLMSG_ERROR,
 	})
@@ -678,7 +714,7 @@ func dumpErrorMesage(hdr linux.NetlinkMessageHeader, ms *MessageSet, err *syserr
 	})
 }
 
-func dumpAckMesage(hdr linux.NetlinkMessageHeader, ms *MessageSet) {
+func dumpAckMessage(hdr linux.NetlinkMessageHeader, ms *MessageSet) {
 	m := ms.AddMessage(linux.NetlinkMessageHeader{
 		Type: linux.NLMSG_ERROR,
 	})
@@ -708,9 +744,9 @@ func (s *Socket) processMessages(ctx context.Context, buf []byte) *syserr.Error 
 
 		ms := NewMessageSet(s.portID, hdr.Seq)
 		if err := s.protocol.ProcessMessage(ctx, msg, ms); err != nil {
-			dumpErrorMesage(hdr, ms, err)
+			dumpErrorMessage(hdr, ms, err)
 		} else if hdr.Flags&linux.NLM_F_ACK == linux.NLM_F_ACK {
-			dumpAckMesage(hdr, ms)
+			dumpAckMessage(hdr, ms)
 		}
 
 		if err := s.sendResponse(ctx, ms); err != nil {

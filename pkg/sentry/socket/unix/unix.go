@@ -17,6 +17,7 @@
 package unix
 
 import (
+	"bytes"
 	"fmt"
 
 	"golang.org/x/sys/unix"
@@ -37,7 +38,6 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/socket/unix/transport"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/syserr"
-	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/usermem"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
@@ -132,7 +132,7 @@ func (s *Socket) GetSockOpt(t *kernel.Task, level, name int, outPtr hostarch.Add
 
 // blockingAccept implements a blocking version of accept(2), that is, if no
 // connections are ready to be accept, it will block until one becomes ready.
-func (s *Socket) blockingAccept(t *kernel.Task, peerAddr *tcpip.FullAddress) (transport.Endpoint, *syserr.Error) {
+func (s *Socket) blockingAccept(t *kernel.Task, peerAddr *transport.Address) (transport.Endpoint, *syserr.Error) {
 	// Register for notifications.
 	e, ch := waiter.NewChannelEntry(waiter.ReadableEvents)
 	s.EventRegister(&e)
@@ -154,9 +154,9 @@ func (s *Socket) blockingAccept(t *kernel.Task, peerAddr *tcpip.FullAddress) (tr
 // Accept implements the linux syscall accept(2) for sockets backed by
 // a transport.Endpoint.
 func (s *Socket) Accept(t *kernel.Task, peerRequested bool, flags int, blocking bool) (int32, linux.SockAddr, uint32, *syserr.Error) {
-	var peerAddr *tcpip.FullAddress
+	var peerAddr *transport.Address
 	if peerRequested {
-		peerAddr = &tcpip.FullAddress{}
+		peerAddr = &transport.Address{}
 	}
 	ep, err := s.ep.Accept(t, peerAddr)
 	if err != nil {
@@ -184,7 +184,7 @@ func (s *Socket) Accept(t *kernel.Task, peerRequested bool, flags int, blocking 
 	var addr linux.SockAddr
 	var addrLen uint32
 	if peerAddr != nil {
-		addr, addrLen = socket.ConvertAddress(linux.AF_UNIX, *peerAddr)
+		addr, addrLen = convertAddress(*peerAddr)
 	}
 
 	fd, e := t.NewFDFrom(0, ns, kernel.FDFlags{
@@ -222,7 +222,7 @@ func (s *Socket) Bind(t *kernel.Task, sockaddr []byte) *syserr.Error {
 			// syserr.ErrPortInUse corresponds to EADDRINUSE.
 			return syserr.ErrPortInUse
 		}
-		if err := s.ep.Bind(tcpip.FullAddress{Addr: tcpip.Address(p)}); err != nil {
+		if err := s.ep.Bind(transport.Address{Addr: p}); err != nil {
 			asn.Remove(name, s)
 			return err
 		}
@@ -261,7 +261,7 @@ func (s *Socket) Bind(t *kernel.Task, sockaddr []byte) *syserr.Error {
 	if err != nil {
 		return syserr.FromError(err)
 	}
-	if err := s.ep.Bind(tcpip.FullAddress{Addr: tcpip.Address(p)}); err != nil {
+	if err := s.ep.Bind(transport.Address{Addr: p}); err != nil {
 		if unlinkErr := t.Kernel().VFS().UnlinkAt(t, t.Credentials(), &pop); unlinkErr != nil {
 			log.Warningf("failed to unlink socket file created for bind(%q): %v", p, unlinkErr)
 		}
@@ -436,7 +436,7 @@ func (s *Socket) Endpoint() transport.Endpoint {
 
 // extractPath extracts and validates the address.
 func extractPath(sockaddr []byte) (string, *syserr.Error) {
-	addr, family, err := socket.AddressAndFamily(sockaddr)
+	addr, family, err := addressAndFamily(sockaddr)
 	if err != nil {
 		if err == syserr.ErrAddressFamilyNotSupported {
 			err = syserr.ErrInvalidArgument
@@ -448,7 +448,7 @@ func extractPath(sockaddr []byte) (string, *syserr.Error) {
 	}
 
 	// The address is trimmed by GetAddress.
-	p := string(addr.Addr)
+	p := addr.Addr
 	if p == "" {
 		// Not allowed.
 		return "", syserr.ErrInvalidArgument
@@ -461,6 +461,33 @@ func extractPath(sockaddr []byte) (string, *syserr.Error) {
 	return p, nil
 }
 
+func addressAndFamily(addr []byte) (transport.Address, uint16, *syserr.Error) {
+	// Make sure we have at least 2 bytes for the address family.
+	if len(addr) < 2 {
+		return transport.Address{}, 0, syserr.ErrInvalidArgument
+	}
+
+	// Get the rest of the fields based on the address family.
+	switch family := hostarch.ByteOrder.Uint16(addr); family {
+	case linux.AF_UNIX:
+		path := addr[2:]
+		if len(path) > linux.UnixPathMax {
+			return transport.Address{}, family, syserr.ErrInvalidArgument
+		}
+		// Drop the terminating NUL (if one exists) and everything after
+		// it for filesystem (non-abstract) addresses.
+		if len(path) > 0 && path[0] != 0 {
+			if n := bytes.IndexByte(path[1:], 0); n >= 0 {
+				path = path[:n+1]
+			}
+		}
+		return transport.Address{
+			Addr: string(path),
+		}, family, nil
+	}
+	return transport.Address{}, 0, syserr.ErrAddressFamilyNotSupported
+}
+
 // GetPeerName implements the linux syscall getpeername(2) for sockets backed by
 // a transport.Endpoint.
 func (s *Socket) GetPeerName(t *kernel.Task) (linux.SockAddr, uint32, *syserr.Error) {
@@ -469,7 +496,7 @@ func (s *Socket) GetPeerName(t *kernel.Task) (linux.SockAddr, uint32, *syserr.Er
 		return nil, 0, syserr.TranslateNetstackError(err)
 	}
 
-	a, l := socket.ConvertAddress(linux.AF_UNIX, addr)
+	a, l := convertAddress(addr)
 	return a, l, nil
 }
 
@@ -481,7 +508,7 @@ func (s *Socket) GetSockName(t *kernel.Task) (linux.SockAddr, uint32, *syserr.Er
 		return nil, 0, syserr.TranslateNetstackError(err)
 	}
 
-	a, l := socket.ConvertAddress(linux.AF_UNIX, addr)
+	a, l := convertAddress(addr)
 	return a, l, nil
 }
 
@@ -709,7 +736,7 @@ func (s *Socket) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, have
 		Peek:      peek,
 	}
 	if senderRequested {
-		r.From = &tcpip.FullAddress{}
+		r.From = &transport.Address{}
 	}
 
 	doRead := func() (int64, error) {
@@ -739,7 +766,7 @@ func (s *Socket) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, have
 		var from linux.SockAddr
 		var fromLen uint32
 		if r.From != nil && len([]byte(r.From.Addr)) != 0 {
-			from, fromLen = socket.ConvertAddress(linux.AF_UNIX, *r.From)
+			from, fromLen = convertAddress(*r.From)
 		}
 
 		if r.ControlTrunc {
@@ -774,7 +801,7 @@ func (s *Socket) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, have
 			var from linux.SockAddr
 			var fromLen uint32
 			if r.From != nil {
-				from, fromLen = socket.ConvertAddress(linux.AF_UNIX, *r.From)
+				from, fromLen = convertAddress(*r.From)
 			}
 
 			if r.ControlTrunc {
@@ -824,6 +851,26 @@ func (s *Socket) State() uint32 {
 func (s *Socket) Type() (family int, skType linux.SockType, protocol int) {
 	// Unix domain sockets always have a protocol of 0.
 	return linux.AF_UNIX, s.stype, 0
+}
+
+func convertAddress(addr transport.Address) (linux.SockAddr, uint32) {
+	var out linux.SockAddrUnix
+	out.Family = linux.AF_UNIX
+	l := len([]byte(addr.Addr))
+	for i := 0; i < l; i++ {
+		out.Path[i] = int8(addr.Addr[i])
+	}
+
+	// Linux returns the used length of the address struct (including the
+	// null terminator) for filesystem paths. The Family field is 2 bytes.
+	// It is sometimes allowed to exclude the null terminator if the
+	// address length is the max. Abstract and empty paths always return
+	// the full exact length.
+	if l == 0 || out.Path[0] == 0 || l == len(out.Path) {
+		return &out, uint32(2 + l)
+	}
+	return &out, uint32(3 + l)
+
 }
 
 func init() {

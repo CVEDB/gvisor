@@ -16,6 +16,7 @@
 
 #ifdef __linux__
 #include <linux/filter.h>
+#include <sys/epoll.h>
 #endif  // __linux__
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -27,6 +28,7 @@
 #include <limits>
 #include <vector>
 
+#include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "absl/status/statusor.h"
 #include "absl/time/clock.h"
@@ -36,6 +38,8 @@
 #include "test/util/socket_util.h"
 #include "test/util/test_util.h"
 #include "test/util/thread_util.h"
+
+using ::testing::AnyOf;
 
 namespace gvisor {
 namespace testing {
@@ -126,13 +130,13 @@ static void FillSocketBuffers(int sender, int receiver) {
       SyscallSucceedsWithValue(0));
 
   // Create a large buffer that will be used for sending.
-  std::vector<char> buf(1 << 16);
+  std::vector<char> buf(buf_sz << 2);
 
   // Write until we receive an error.
   while (RetryEINTR(send)(sender, buf.data(), buf.size(), 0) != -1) {
     // Sleep to give linux a chance to move data from the send buffer to the
     // receive buffer.
-    usleep(10000);  // 10ms.
+    absl::SleepFor(absl::Milliseconds(100));  // 100ms.
   }
   // The last error should have been EWOULDBLOCK.
   ASSERT_EQ(errno, EWOULDBLOCK);
@@ -899,6 +903,67 @@ TEST_P(TcpSocketTest, TimeWaitPollHUP) {
   ASSERT_THAT(poll(&pfd, 1, kTimeoutMillis), SyscallSucceedsWithValue(1));
 }
 
+// Tests that send will return EWOULDBLOCK initially with large buffer and will
+// succeed after the send buffer size is increased.
+TEST_P(TcpSocketTest, SendUnblocksOnSendBufferIncrease) {
+  // Set the FD to O_NONBLOCK.
+  int opts;
+  ASSERT_THAT(opts = fcntl(connected_.get(), F_GETFL), SyscallSucceeds());
+  opts |= O_NONBLOCK;
+  ASSERT_THAT(fcntl(connected_.get(), F_SETFL, opts), SyscallSucceeds());
+
+  // Get maximum buffer size by trying to set it to a large value.
+  constexpr int kSndBufSz = 0xffffffff;
+  ASSERT_THAT(setsockopt(connected_.get(), SOL_SOCKET, SO_SNDBUF, &kSndBufSz,
+                         sizeof(kSndBufSz)),
+              SyscallSucceeds());
+
+  int max_buffer_sz = 0;
+  socklen_t max_len = sizeof(max_buffer_sz);
+  ASSERT_THAT(getsockopt(connected_.get(), SOL_SOCKET, SO_SNDBUF,
+                         &max_buffer_sz, &max_len),
+              SyscallSucceeds());
+
+  int buffer_sz = max_buffer_sz >> 2;
+  EXPECT_THAT(setsockopt(connected_.get(), SOL_SOCKET, SO_SNDBUF, &buffer_sz,
+                         sizeof(buffer_sz)),
+              SyscallSucceedsWithValue(0));
+
+  // Create a large buffer that will be used for sending.
+  std::vector<char> buffer(max_buffer_sz);
+
+  // Write until we receive an error.
+  while (RetryEINTR(send)(connected_.get(), buffer.data(), buffer.size(), 0) !=
+         -1) {
+    // Sleep to give linux a chance to move data from the send buffer to the
+    // receive buffer.
+    absl::SleepFor(absl::Milliseconds(10));  // 10ms.
+  }
+
+  // The last error should have been EWOULDBLOCK.
+  ASSERT_EQ(errno, EWOULDBLOCK);
+
+  ScopedThread send_thread([this]() {
+    int flags = 0;
+    ASSERT_THAT(flags = fcntl(connected_.get(), F_GETFL), SyscallSucceeds());
+    EXPECT_THAT(fcntl(connected_.get(), F_SETFL, flags & ~O_NONBLOCK),
+                SyscallSucceeds());
+
+    // Expect the send() to succeed.
+    char buffer;
+    ASSERT_THAT(RetryEINTR(send)(connected_.get(), &buffer, sizeof(buffer), 0),
+                SyscallSucceeds());
+  });
+
+  // Set SO_SNDBUF to maximum buffer size allowed.
+  buffer_sz = max_buffer_sz >> 1;
+  EXPECT_THAT(setsockopt(connected_.get(), SOL_SOCKET, SO_SNDBUF, &buffer_sz,
+                         sizeof(buffer_sz)),
+              SyscallSucceedsWithValue(0));
+
+  send_thread.Join();
+}
+
 INSTANTIATE_TEST_SUITE_P(AllInetTests, TcpSocketTest,
                          ::testing::Values(AF_INET, AF_INET6));
 
@@ -1191,6 +1256,8 @@ TEST_P(SimpleTcpSocketTest, NonBlockingConnectNoListener) {
 }
 
 TEST_P(SimpleTcpSocketTest, ListenConnectParallel) {
+  // TODO(b/171436815): Re-enable when S/R is fixed.
+  const DisableSave disable_save;
   int family = GetParam();
   sockaddr_storage addr =
       ASSERT_NO_ERRNO_AND_VALUE(InetLoopbackAddrZeroPort(GetParam()));
@@ -1793,17 +1860,19 @@ TEST_P(SimpleTcpSocketTest, SetMaxSeg) {
                          sizeof(kTCPMaxSeg)),
               SyscallSucceedsWithValue(0));
 
-  // Linux actually never returns the user_mss value. It will always return the
-  // default MSS value defined above for an unconnected socket and always return
-  // the actual current MSS for a connected one.
   int optval;
   socklen_t optlen = sizeof(optval);
   ASSERT_THAT(getsockopt(s.get(), IPPROTO_TCP, TCP_MAXSEG, &optval, &optlen),
               SyscallSucceedsWithValue(0));
   ASSERT_EQ(optlen, sizeof(optval));
 
-  EXPECT_EQ(kDefaultMSS, optval);
-  EXPECT_EQ(sizeof(optval), optlen);
+  // In older Linux versions, user_mss value was never actually returned. Linux
+  // would always return the default MSS value for an unconnected socket and
+  // always return the actual current MSS for a connected one. However, the
+  // behavior changed since 34dfde4ad87b ("tcp: Return user_mss for TCP_MAXSEG
+  // in CLOSE/LISTEN state if user_mss set"). With this change, user_mss is
+  // returned if set for unconnected sockets. So allow both.
+  EXPECT_THAT(optval, AnyOf(kDefaultMSS, kTCPMaxSeg));
 }
 
 TEST_P(SimpleTcpSocketTest, SetMaxSegFailsForInvalidMSSValues) {
@@ -2308,18 +2377,24 @@ void ShutdownConnectingSocket(int domain, int shutdown_mode) {
 }
 
 TEST_P(SimpleTcpSocketTest, ShutdownReadConnectingSocket) {
+  // TODO(b/171436815): Re-enable when S/R is fixed.
+  const DisableSave disable_save;
   // TODO(b/175409607): Fix this test for hostinet.
   SKIP_IF(IsRunningWithHostinet());
   ShutdownConnectingSocket(GetParam(), SHUT_RD);
 }
 
 TEST_P(SimpleTcpSocketTest, ShutdownWriteConnectingSocket) {
+  // TODO(b/171436815): Re-enable when S/R is fixed.
+  const DisableSave disable_save;
   // TODO(b/175409607): Fix this test for hostinet.
   SKIP_IF(IsRunningWithHostinet());
   ShutdownConnectingSocket(GetParam(), SHUT_WR);
 }
 
 TEST_P(SimpleTcpSocketTest, ShutdownReadWriteConnectingSocket) {
+  // TODO(b/171436815): Re-enable when S/R is fixed.
+  const DisableSave disable_save;
   // TODO(b/175409607): Fix this test for hostinet.
   SKIP_IF(IsRunningWithHostinet());
   ShutdownConnectingSocket(GetParam(), SHUT_RDWR);
@@ -2347,6 +2422,8 @@ TEST_P(SimpleTcpSocketTest, ConnectUnspecifiedAddress) {
 }
 
 TEST_P(SimpleTcpSocketTest, OnlyAcknowledgeBacklogConnections) {
+  // TODO(b/171436815): Re-enable when S/R is fixed.
+  const DisableSave disable_save;
   // TODO(b/175409607): Fix this test for hostinet.
   SKIP_IF(IsRunningWithHostinet());
 
@@ -2415,6 +2492,8 @@ TEST_P(SimpleTcpSocketTest, OnlyAcknowledgeBacklogConnections) {
 }
 
 TEST_P(SimpleTcpSocketTest, SynRcvdOnListenerShutdown) {
+  // TODO(b/171436815): Re-enable when S/R is fixed.
+  const DisableSave disable_save;
   FileDescriptor bound_s =
       ASSERT_NO_ERRNO_AND_VALUE(Socket(GetParam(), SOCK_STREAM, IPPROTO_TCP));
 
@@ -2488,18 +2567,16 @@ TEST_P(SimpleTcpSocketTest, SynRcvdOnListenerShutdown) {
                   POLLOUT
 #else
                   []() {
-                    const int expected_revents =
-                        POLLIN | POLLOUT | POLLHUP | POLLRDNORM | POLLWRNORM;
+                    const int expected_revents = POLLIN | POLLOUT | POLLHUP |
+                                                 POLLRDNORM | POLLWRNORM |
+                                                 POLLRDHUP;
                     // TODO(gvisor.dev/issue/6666): POLLERR is still present
                     // after getsockopt(..., SO_ERROR, ...) call (unless
                     // hostinet is used).
-                    if (IsRunningOnGvisor()) {
-                      if (IsRunningWithHostinet()) {
-                        return expected_revents;
-                      }
+                    if (IsRunningOnGvisor() && !IsRunningWithHostinet()) {
                       return expected_revents | POLLPRI | POLLERR;
                     }
-                    return expected_revents | POLLRDHUP;
+                    return expected_revents;
                   }()
 #endif
         );
@@ -2529,66 +2606,64 @@ TEST_P(SimpleTcpSocketTest, SynRcvdOnListenerShutdown) {
   }
 }
 
-// Tests that send will return EWOULDBLOCK initially with large buffer and will
-// succeed after the send buffer size is increased.
-TEST_P(TcpSocketTest, SendUnblocksOnSendBufferIncrease) {
-  // Set the FD to O_NONBLOCK.
-  int opts;
-  ASSERT_THAT(opts = fcntl(connected_.get(), F_GETFL), SyscallSucceeds());
-  opts |= O_NONBLOCK;
-  ASSERT_THAT(fcntl(connected_.get(), F_SETFL, opts), SyscallSucceeds());
+// Fuchsia doesn't have epoll.
+#ifdef __linux__
 
-  // Get maximum buffer size by trying to set it to a large value.
-  constexpr int kSndBufSz = 0xffffffff;
-  ASSERT_THAT(setsockopt(connected_.get(), SOL_SOCKET, SO_SNDBUF, &kSndBufSz,
-                         sizeof(kSndBufSz)),
+// Ensure that we can S/R when epoll is waiting on a listening socket.
+// Regression test for b/280313827.
+TEST_P(SimpleTcpSocketTest, EpollListeningSocket) {
+  // Create the listening socket.
+  int fd;
+  ASSERT_THAT(fd = socket(GetParam(), SOCK_STREAM | SOCK_NONBLOCK, 0),
+              SyscallSucceeds());
+  FileDescriptor sockfd(fd);
+
+  // Bind to some port.
+  sockaddr_storage addr =
+      ASSERT_NO_ERRNO_AND_VALUE(InetLoopbackAddrZeroPort(GetParam()));
+  socklen_t addrlen = sizeof(addr);
+  ASSERT_THAT(bind(sockfd.get(), AsSockAddr(&addr), addrlen),
               SyscallSucceeds());
 
-  int max_buffer_sz = 0;
-  socklen_t max_len = sizeof(max_buffer_sz);
-  ASSERT_THAT(getsockopt(connected_.get(), SOL_SOCKET, SO_SNDBUF,
-                         &max_buffer_sz, &max_len),
-              SyscallSucceeds());
+  // Listen and accept with the expectation that accept fails.
+  ASSERT_THAT(listen(sockfd.get(), 2), SyscallSucceeds());
+  ASSERT_THAT(accept(sockfd.get(), nullptr, nullptr),
+              SyscallFailsWithErrno(EAGAIN));
 
-  int buffer_sz = max_buffer_sz >> 2;
-  EXPECT_THAT(setsockopt(connected_.get(), SOL_SOCKET, SO_SNDBUF, &buffer_sz,
-                         sizeof(buffer_sz)),
-              SyscallSucceedsWithValue(0));
+  // Start a thread that waits a bit, then connects to the listening socket.
+  ScopedThread save_and_connect_thread([&]() {
+    // Give epoll a chance to start blocking.
+    absl::SleepFor(absl::Seconds(1));
 
-  // Create a large buffer that will be used for sending.
-  std::vector<char> buffer(max_buffer_sz);
+    // Save while epoll is blocking.
+    MaybeSave();
 
-  // Write until we receive an error.
-  while (RetryEINTR(send)(connected_.get(), buffer.data(), buffer.size(), 0) !=
-         -1) {
-    // Sleep to give linux a chance to move data from the send buffer to the
-    // receive buffer.
-    usleep(10000);  // 10ms.
-  }
-
-  // The last error should have been EWOULDBLOCK.
-  ASSERT_EQ(errno, EWOULDBLOCK);
-
-  ScopedThread send_thread([this]() {
-    int flags = 0;
-    ASSERT_THAT(flags = fcntl(connected_.get(), F_GETFL), SyscallSucceeds());
-    EXPECT_THAT(fcntl(connected_.get(), F_SETFL, flags & ~O_NONBLOCK),
+    // Get the listener's address and connect to it.
+    int fd;
+    ASSERT_THAT(fd = socket(GetParam(), SOCK_STREAM, 0), SyscallSucceeds());
+    FileDescriptor connfd(fd);
+    ASSERT_THAT(getsockname(sockfd.get(), AsSockAddr(&addr), &addrlen),
                 SyscallSucceeds());
-
-    // Expect the send() to succeed.
-    char buffer;
-    ASSERT_THAT(RetryEINTR(send)(connected_.get(), &buffer, sizeof(buffer), 0),
+    ASSERT_THAT(RetryEINTR(connect)(connfd.get(), AsSockAddr(&addr), addrlen),
                 SyscallSucceeds());
   });
 
-  // Set SO_SNDBUF to maximum buffer size allowed.
-  buffer_sz = max_buffer_sz >> 1;
-  EXPECT_THAT(setsockopt(connected_.get(), SOL_SOCKET, SO_SNDBUF, &buffer_sz,
-                         sizeof(buffer_sz)),
-              SyscallSucceedsWithValue(0));
+  // Epoll on sockfd.
+  ASSERT_THAT(fd = epoll_create(1), SyscallSucceeds());
+  FileDescriptor epollfd(fd);
+  struct epoll_event event = {};
+  event.events = EPOLLIN;
+  ASSERT_THAT(epoll_ctl(epollfd.get(), EPOLL_CTL_ADD, sockfd.get(), &event),
+              SyscallSucceeds());
 
-  send_thread.Join();
+  struct epoll_event results = {};
+  ASSERT_THAT(RetryEINTR(epoll_wait)(epollfd.get(), &results, 1, 60000),
+              SyscallSucceeds());
+
+  save_and_connect_thread.Join();
 }
+
+#endif  // __linux__
 
 INSTANTIATE_TEST_SUITE_P(AllInetTests, SimpleTcpSocketTest,
                          ::testing::Values(AF_INET, AF_INET6));

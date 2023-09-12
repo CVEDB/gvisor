@@ -136,8 +136,11 @@ func TestCloseReader(t *testing.T) {
 		s.Wait()
 	}()
 
-	addr := tcpip.FullAddress{NICID, tcpip.Address(net.IPv4(169, 254, 10, 1).To4()), 11211}
-
+	addr := tcpip.FullAddress{
+		NIC:  NICID,
+		Addr: tcpip.AddrFromSlice(net.IPv4(169, 254, 10, 1).To4()),
+		Port: 11211,
+	}
 	protocolAddr := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: addr.Addr.WithPrefix(),
@@ -196,7 +199,11 @@ func TestCloseReaderWithForwarder(t *testing.T) {
 		s.Wait()
 	}()
 
-	addr := tcpip.FullAddress{NICID, tcpip.Address(net.IPv4(169, 254, 10, 1).To4()), 11211}
+	addr := tcpip.FullAddress{
+		NIC:  NICID,
+		Addr: tcpip.AddrFromSlice(net.IPv4(169, 254, 10, 1).To4()),
+		Port: 11211,
+	}
 	protocolAddr := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: addr.Addr.WithPrefix(),
@@ -256,7 +263,11 @@ func TestCloseRead(t *testing.T) {
 		s.Wait()
 	}()
 
-	addr := tcpip.FullAddress{NICID, tcpip.Address(net.IPv4(169, 254, 10, 1).To4()), 11211}
+	addr := tcpip.FullAddress{
+		NIC:  NICID,
+		Addr: tcpip.AddrFromSlice(net.IPv4(169, 254, 10, 1).To4()),
+		Port: 11211,
+	}
 	protocolAddr := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: addr.Addr.WithPrefix(),
@@ -314,7 +325,11 @@ func TestCloseWrite(t *testing.T) {
 		s.Wait()
 	}()
 
-	addr := tcpip.FullAddress{NICID, tcpip.Address(net.IPv4(169, 254, 10, 1).To4()), 11211}
+	addr := tcpip.FullAddress{
+		NIC:  NICID,
+		Addr: tcpip.AddrFromSlice(net.IPv4(169, 254, 10, 1).To4()),
+		Port: 11211,
+	}
 	protocolAddr := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: addr.Addr.WithPrefix(),
@@ -378,7 +393,11 @@ func TestCloseStack(t *testing.T) {
 		t.Fatalf("newLoopbackStack() = %v", err)
 	}
 
-	addr := tcpip.FullAddress{NICID, tcpip.Address(net.IPv4(169, 254, 10, 1).To4()), 11211}
+	addr := tcpip.FullAddress{
+		NIC:  NICID,
+		Addr: tcpip.AddrFromSlice(net.IPv4(169, 254, 10, 1).To4()),
+		Port: 11211,
+	}
 	protocolAddr := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: addr.Addr.WithPrefix(),
@@ -402,15 +421,17 @@ func TestCloseStack(t *testing.T) {
 		c := NewTCPConn(&wq, ep)
 
 		// Give c.Read() a chance to block before closing the stack.
-		time.AfterFunc(time.Second*1, func() {
+		time.AfterFunc(50*time.Millisecond, func() {
 			s.Close()
 			s.Wait()
 		})
 
 		buf := make([]byte, 256)
 		n, e := c.Read(buf)
-		if n != 0 || !strings.Contains(e.Error(), "operation aborted") {
-			t.Errorf("c.Read() = (%d, %v), want (0, operation aborted)", n, e)
+		// Depending on the ordering of Close and Read, we should get
+		// one of two errors.
+		if n != 0 || (!strings.Contains(e.Error(), "operation aborted") && !strings.Contains(e.Error(), "connection reset by peer")) {
+			t.Errorf("c.Read() = (%d, %v), want (0, operation aborted) or (0, connection reset by peer)", n, e)
 		}
 	})
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, fwd.HandlePacket)
@@ -438,8 +459,8 @@ func TestUDPForwarder(t *testing.T) {
 		s.Wait()
 	}()
 
-	ip1 := tcpip.Address(net.IPv4(169, 254, 10, 1).To4())
-	addr1 := tcpip.FullAddress{NICID, ip1, 11211}
+	ip1 := tcpip.AddrFromSlice(net.IPv4(169, 254, 10, 1).To4())
+	addr1 := tcpip.FullAddress{NIC: NICID, Addr: ip1, Port: 11211}
 	protocolAddr1 := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: ip1.WithPrefix(),
@@ -447,8 +468,8 @@ func TestUDPForwarder(t *testing.T) {
 	if err := s.AddProtocolAddress(NICID, protocolAddr1, stack.AddressProperties{}); err != nil {
 		t.Fatalf("AddProtocolAddress(%d, %+v, {}): %s", NICID, protocolAddr1, err)
 	}
-	ip2 := tcpip.Address(net.IPv4(169, 254, 10, 2).To4())
-	addr2 := tcpip.FullAddress{NICID, ip2, 11311}
+	ip2 := tcpip.AddrFromSlice(net.IPv4(169, 254, 10, 2).To4())
+	addr2 := tcpip.FullAddress{NIC: NICID, Addr: ip2, Port: 11311}
 	protocolAddr2 := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: ip2.WithPrefix(),
@@ -511,7 +532,11 @@ func TestDeadlineChange(t *testing.T) {
 		s.Wait()
 	}()
 
-	addr := tcpip.FullAddress{NICID, tcpip.Address(net.IPv4(169, 254, 10, 1).To4()), 11211}
+	addr := tcpip.FullAddress{
+		NIC:  NICID,
+		Addr: tcpip.AddrFromSlice(net.IPv4(169, 254, 10, 1).To4()),
+		Port: 11211,
+	}
 
 	protocolAddr := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
@@ -572,8 +597,8 @@ func TestPacketConnTransfer(t *testing.T) {
 		s.Wait()
 	}()
 
-	ip1 := tcpip.Address(net.IPv4(169, 254, 10, 1).To4())
-	addr1 := tcpip.FullAddress{NICID, ip1, 11211}
+	ip1 := tcpip.AddrFromSlice(net.IPv4(169, 254, 10, 1).To4())
+	addr1 := tcpip.FullAddress{NIC: NICID, Addr: ip1, Port: 11211}
 	protocolAddr1 := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: ip1.WithPrefix(),
@@ -581,8 +606,8 @@ func TestPacketConnTransfer(t *testing.T) {
 	if err := s.AddProtocolAddress(NICID, protocolAddr1, stack.AddressProperties{}); err != nil {
 		t.Fatalf("AddProtocolAddress(%d, %+v, {}): %s", NICID, protocolAddr1, err)
 	}
-	ip2 := tcpip.Address(net.IPv4(169, 254, 10, 2).To4())
-	addr2 := tcpip.FullAddress{NICID, ip2, 11311}
+	ip2 := tcpip.AddrFromSlice(net.IPv4(169, 254, 10, 2).To4())
+	addr2 := tcpip.FullAddress{NIC: NICID, Addr: ip2, Port: 11311}
 	protocolAddr2 := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: ip2.WithPrefix(),
@@ -640,8 +665,8 @@ func TestConnectedPacketConnTransfer(t *testing.T) {
 		s.Wait()
 	}()
 
-	ip := tcpip.Address(net.IPv4(169, 254, 10, 1).To4())
-	addr := tcpip.FullAddress{NICID, ip, 11211}
+	ip := tcpip.AddrFromSlice(net.IPv4(169, 254, 10, 1).To4())
+	addr := tcpip.FullAddress{NIC: NICID, Addr: ip, Port: 11211}
 	protocolAddr := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: ip.WithPrefix(),
@@ -690,8 +715,8 @@ func makePipe() (c1, c2 net.Conn, stop func(), err error) {
 		return nil, nil, nil, fmt.Errorf("newLoopbackStack() = %v", e)
 	}
 
-	ip := tcpip.Address(net.IPv4(169, 254, 10, 1).To4())
-	addr := tcpip.FullAddress{NICID, ip, 11211}
+	ip := tcpip.AddrFromSlice(net.IPv4(169, 254, 10, 1).To4())
+	addr := tcpip.FullAddress{NIC: NICID, Addr: ip, Port: 11211}
 	protocolAddr := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: ip.WithPrefix(),
@@ -790,8 +815,8 @@ func TestTCPDialError(t *testing.T) {
 		s.Wait()
 	}()
 
-	ip := tcpip.Address(net.IPv4(169, 254, 10, 1).To4())
-	addr := tcpip.FullAddress{NICID, ip, 11211}
+	ip := tcpip.AddrFromSlice(net.IPv4(169, 254, 10, 1).To4())
+	addr := tcpip.FullAddress{NIC: NICID, Addr: ip, Port: 11211}
 
 	switch _, err := DialTCP(s, addr, ipv4.ProtocolNumber); err := err.(type) {
 	case *net.OpError:
@@ -813,7 +838,11 @@ func TestDialContextTCPCanceled(t *testing.T) {
 		s.Wait()
 	}()
 
-	addr := tcpip.FullAddress{NICID, tcpip.Address(net.IPv4(169, 254, 10, 1).To4()), 11211}
+	addr := tcpip.FullAddress{
+		NIC:  NICID,
+		Addr: tcpip.AddrFromSlice(net.IPv4(169, 254, 10, 1).To4()),
+		Port: 11211,
+	}
 	protocolAddr := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: addr.Addr.WithPrefix(),
@@ -841,7 +870,11 @@ func TestDialContextTCPTimeout(t *testing.T) {
 		s.Wait()
 	}()
 
-	addr := tcpip.FullAddress{NICID, tcpip.Address(net.IPv4(169, 254, 10, 1).To4()), 11211}
+	addr := tcpip.FullAddress{
+		NIC:  NICID,
+		Addr: tcpip.AddrFromSlice(net.IPv4(169, 254, 10, 1).To4()),
+		Port: 11211,
+	}
 	protocolAddr := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: addr.Addr.WithPrefix(),
@@ -901,8 +934,11 @@ func TestInterruptListender(t *testing.T) {
 				s.Wait()
 			}()
 
-			addr := tcpip.FullAddress{NICID, tcpip.Address(net.IPv4(169, 254, 10, 1).To4()), 11211}
-
+			addr := tcpip.FullAddress{
+				NIC:  NICID,
+				Addr: tcpip.AddrFromSlice(net.IPv4(169, 254, 10, 1).To4()),
+				Port: 11211,
+			}
 			protocolAddr := tcpip.ProtocolAddress{
 				Protocol:          ipv4.ProtocolNumber,
 				AddressWithPrefix: addr.Addr.WithPrefix(),

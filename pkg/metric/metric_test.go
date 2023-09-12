@@ -15,10 +15,14 @@
 package metric
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"math"
+	"os"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,6 +38,13 @@ const (
 	barDescription     = "Bar Baz"
 	counterDescription = "Counter"
 	distribDescription = "A distribution metric for testing"
+)
+
+var (
+	fieldValFoo  = FieldValue{"foo"}
+	fieldValBar  = FieldValue{"bar"}
+	fieldValBaz  = FieldValue{"baz"}
+	fieldValQuux = FieldValue{"quux"}
 )
 
 // Helper method that exercises Prometheus metric exporting.
@@ -59,6 +70,32 @@ func verifyPrometheusParsing(t *testing.T) {
 	}
 }
 
+func TestVerifyName(t *testing.T) {
+	for name, wantErr := range map[string]bool{
+		"":              true,
+		"/":             true,
+		"/foo":          false,
+		"/foo/bar":      false,
+		"/foo/bar/baz":  false,
+		"/foo/bar/bar":  false,
+		"/foo//bar/baz": true,
+		"//foo/bar":     true,
+		"//":            true,
+		"foo":           true,
+		"foo/bar":       true,
+		"/foo-bar":      true,
+		"/foo bar":      true,
+		"/foo_bar":      false,
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := verifyName(name)
+			if gotErr := (err != nil); gotErr != wantErr {
+				t.Errorf("verifyName(%q) got err=%v wantErr=%v", name, err, wantErr)
+			}
+		})
+	}
+}
+
 func TestInitialize(t *testing.T) {
 	defer resetTest()
 
@@ -73,8 +110,8 @@ func TestInitialize(t *testing.T) {
 	}
 
 	bucketer := NewExponentialBucketer(3, 2, 0, 1)
-	field1 := NewField("field1", []string{"foo", "bar"})
-	field2 := NewField("field2", []string{"baz", "quux"})
+	field1 := NewField("field1", &fieldValFoo, &fieldValBar)
+	field2 := NewField("field2", &fieldValBaz, &fieldValQuux)
 	_, err = NewDistributionMetric("/distrib", true, bucketer, pb.MetricMetadata_UNITS_NANOSECONDS, distribDescription, field1, field2)
 	if err != nil {
 		t.Fatalf("NewDistributionMetric got err %v want nil", err)
@@ -220,8 +257,8 @@ func TestEmitMetricUpdate(t *testing.T) {
 	}
 
 	bucketer := NewExponentialBucketer(2, 2, 0, 1)
-	field1 := NewField("field1", []string{"foo", "bar"})
-	field2 := NewField("field2", []string{"baz", "quux"})
+	field1 := NewField("field1", &fieldValFoo, &fieldValBar)
+	field2 := NewField("field2", &fieldValBaz, &fieldValQuux)
 	distrib, err := NewDistributionMetric("/distrib", false, bucketer, pb.MetricMetadata_UNITS_NONE, distribDescription, field1, field2)
 	if err != nil {
 		t.Fatalf("NewDistributionMetric: %v", err)
@@ -318,12 +355,12 @@ func TestEmitMetricUpdate(t *testing.T) {
 	verifyPrometheusParsing(t)
 
 	// Add a few samples to the distribution metric.
-	distrib.AddSample(1, "foo", "baz")
-	distrib.AddSample(1, "foo", "baz")
-	distrib.AddSample(3, "foo", "baz")
-	distrib.AddSample(-1, "foo", "quux")
-	distrib.AddSample(1, "foo", "quux")
-	distrib.AddSample(100, "foo", "quux")
+	distrib.AddSample(1, &fieldValFoo, &fieldValBaz)
+	distrib.AddSample(1, &fieldValFoo, &fieldValBaz)
+	distrib.AddSample(3, &fieldValFoo, &fieldValBaz)
+	distrib.AddSample(-1, &fieldValFoo, &fieldValQuux)
+	distrib.AddSample(1, &fieldValFoo, &fieldValQuux)
+	distrib.AddSample(100, &fieldValFoo, &fieldValQuux)
 	emitter.Reset()
 	EmitMetricUpdate()
 	if len(emitter) != 1 {
@@ -372,10 +409,10 @@ func TestEmitMetricUpdate(t *testing.T) {
 	verifyPrometheusParsing(t)
 
 	// Add more samples to the distribution metric, check that we get the delta.
-	distrib.AddSample(3, "foo", "baz")
-	distrib.AddSample(2, "foo", "baz")
-	distrib.AddSample(1, "foo", "baz")
-	distrib.AddSample(3, "foo", "baz")
+	distrib.AddSample(3, &fieldValFoo, &fieldValBaz)
+	distrib.AddSample(2, &fieldValFoo, &fieldValBaz)
+	distrib.AddSample(1, &fieldValFoo, &fieldValBaz)
+	distrib.AddSample(3, &fieldValFoo, &fieldValBaz)
 	emitter.Reset()
 	EmitMetricUpdate()
 	if len(emitter) != 1 {
@@ -409,9 +446,11 @@ func TestEmitMetricUpdate(t *testing.T) {
 func TestEmitMetricUpdateWithFields(t *testing.T) {
 	defer resetTest()
 
-	field := Field{
-		name:          "weirdness_type",
-		allowedValues: []string{"weird1", "weird2"}}
+	var (
+		weird1 = FieldValue{"weird1"}
+		weird2 = FieldValue{"weird2"}
+	)
+	field := NewField("weirdness_type", &weird1, &weird2)
 
 	counter, err := NewUint64Metric("/weirdness", false, pb.MetricMetadata_UNITS_NONE, counterDescription, field)
 	if err != nil {
@@ -434,8 +473,8 @@ func TestEmitMetricUpdateWithFields(t *testing.T) {
 	}
 	verifyPrometheusParsing(t)
 
-	counter.IncrementBy(4, "weird1")
-	counter.Increment("weird2")
+	counter.IncrementBy(4, &weird1)
+	counter.Increment(&weird2)
 
 	emitter.Reset()
 	EmitMetricUpdate()
@@ -466,7 +505,7 @@ func TestEmitMetricUpdateWithFields(t *testing.T) {
 		}
 
 		switch m.FieldValues[0] {
-		case "weird1":
+		case weird1.Value:
 			uv, ok := m.Value.(*pb.MetricValue_Uint64Value)
 			if !ok {
 				t.Errorf("%+v: value %v got %T want pb.MetricValue_Uint64Value", m, m.Value, m.Value)
@@ -475,7 +514,7 @@ func TestEmitMetricUpdateWithFields(t *testing.T) {
 				t.Errorf("%v: Value got %v want 4", m, uv.Uint64Value)
 			}
 			foundWeird1 = true
-		case "weird2":
+		case weird2.Value:
 			uv, ok := m.Value.(*pb.MetricValue_Uint64Value)
 			if !ok {
 				t.Errorf("%+v: value %v got %T want pb.MetricValue_Uint64Value", m, m.Value, m.Value)
@@ -650,8 +689,8 @@ func TestTimerMetric(t *testing.T) {
 	defer resetTest()
 	// This bucketer just has 2 finite buckets: [0, 500ms) and [500ms, 1s).
 	bucketer := NewExponentialBucketer(2, uint64((500 * time.Millisecond).Nanoseconds()), 0, 1)
-	field1 := NewField("field1", []string{"foo", "bar"})
-	field2 := NewField("field2", []string{"baz", "quux"})
+	field1 := NewField("field1", &fieldValFoo, &fieldValBar)
+	field2 := NewField("field2", &fieldValBaz, &fieldValQuux)
 	timer, err := NewTimerMetric("/timer", bucketer, "a timer metric", field1, field2)
 	if err != nil {
 		t.Fatalf("NewTimerMetric: %v", err)
@@ -668,8 +707,8 @@ func TestTimerMetric(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			op := timer.Start("foo")
-			defer op.Finish("quux")
+			op := timer.Start(&fieldValFoo)
+			defer op.Finish(&fieldValQuux)
 			time.Sleep(250 * time.Millisecond)
 		}()
 	}
@@ -678,7 +717,7 @@ func TestTimerMetric(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			op := timer.Start()
-			defer op.Finish("foo", "quux")
+			defer op.Finish(&fieldValFoo, &fieldValQuux)
 			time.Sleep(750 * time.Millisecond)
 		}()
 	}
@@ -860,11 +899,11 @@ func TestFieldMapperWithFields(t *testing.T) {
 		fields := make([]Field, len(fieldSizes))
 		for i, fieldSize := range fieldSizes {
 			fieldName := fmt.Sprintf("%c", 'A'+i)
-			allowedValues := make([]string, fieldSize)
+			allowedValues := make([]*FieldValue, fieldSize)
 			for val := range allowedValues {
-				allowedValues[val] = fmt.Sprintf("%s%d", fieldName, val)
+				allowedValues[val] = &FieldValue{fmt.Sprintf("%s%d", fieldName, val)}
 			}
-			fields[i] = NewField(fieldName, allowedValues)
+			fields[i] = NewField(fieldName, allowedValues...)
 		}
 		return fields
 	}
@@ -891,7 +930,7 @@ func TestFieldMapperWithFields(t *testing.T) {
 		},
 		{
 			name:          "FieldMapperErrNoAllowedValues",
-			fields:        []Field{NewField("TheNoValuesField", []string{})},
+			fields:        []Field{NewField("TheNoValuesField")},
 			errOnCreation: ErrFieldHasNoAllowedValues,
 		},
 	} {
@@ -903,14 +942,14 @@ func TestFieldMapperWithFields(t *testing.T) {
 
 			// Test that every field value combination corresponds to just one entry.
 			mapping := make([]int, m.numKeys())
-			var visitCombinations func(curFields []string, remFields []Field)
-			visitCombinations = func(curFields []string, remFields []Field) {
+			var visitCombinations func(curFields []*FieldValue, remFields []Field)
+			visitCombinations = func(curFields []*FieldValue, remFields []Field) {
 				depth := len(remFields)
 				if depth == 0 {
 					return
 				}
 				if depth == 1 {
-					for _, val := range remFields[0].allowedValues {
+					for _, val := range remFields[0].values {
 						fields := append(curFields, val)
 						key := m.lookup(fields...)
 						mapping[key]++
@@ -918,13 +957,13 @@ func TestFieldMapperWithFields(t *testing.T) {
 						// Assert that the reverse operation is also correct.
 						fields2 := m.keyToMultiField(key)
 						for i, f1val := range fields {
-							if f1val != fields2[i] {
+							if f1val.Value != fields2[i] {
 								t.Errorf("Field values put into the map are not the same as ones returned: got %v wanted %v", fields2, f1val)
 							}
 						}
 					}
 				} else {
-					for _, val := range remFields[0].allowedValues {
+					for _, val := range remFields[0].values {
 						visitCombinations(append(curFields, val), remFields[1:])
 					}
 				}
@@ -953,5 +992,195 @@ func TestFieldMapperNoFields(t *testing.T) {
 	key := m.lookup()
 	if len(m.keyToMultiField(key)) != 0 {
 		t.Errorf("keyToMultiField using key %v (corresponding to no field values): expected no values, got some", key)
+	}
+}
+
+func TestFieldValueUniqueness(t *testing.T) {
+	panicked := false
+	func() {
+		defer func() {
+			recover()
+			panicked = true
+		}()
+		NewField("field1", &FieldValue{"foo"}, &FieldValue{"foo"})
+	}()
+	if !panicked {
+		t.Error("did not panic")
+	}
+}
+
+func TestFieldMapperMustUseSameValuePointer(t *testing.T) {
+	const fooString = "foo"
+	var constFoo = FieldValue{fooString}
+	var heapBar = &FieldValue{fmt.Sprintf("%sr", "ba")}
+	n, err := newFieldMapper(NewField("field1", &constFoo, heapBar))
+	if err != nil {
+		t.Fatalf("newFieldMapper err: got %v wanted nil", err)
+	}
+	n.lookup(&constFoo)
+	n.lookup(heapBar)
+	newFoo := &FieldValue{fmt.Sprintf("%so", "fo")}
+	panicked := false
+	func() {
+		defer func() {
+			recover()
+			panicked = true
+		}()
+		n.lookup(newFoo)
+	}()
+	if !panicked {
+		t.Error("did not panic")
+	}
+}
+
+func TestMetricProfiling(t *testing.T) {
+	for _, test := range []struct {
+		name                 string
+		profilingMetricsFlag string
+		metricNames          []string
+		incrementMetricBy    []uint64
+		numIterations        uint64
+		errOnStartProfiling  bool
+	}{
+		{
+			name:                 "simple single metric",
+			profilingMetricsFlag: "/foo",
+			metricNames:          []string{"/foo"},
+			incrementMetricBy:    []uint64{50},
+			numIterations:        100,
+			errOnStartProfiling:  false,
+		},
+		{
+			name:                 "single metric exceeds snapshot buffer",
+			profilingMetricsFlag: "/foo",
+			metricNames:          []string{"/foo"},
+			incrementMetricBy:    []uint64{1},
+			numIterations:        3500,
+			errOnStartProfiling:  false,
+		},
+		{
+			name:                 "multiple metrics",
+			profilingMetricsFlag: "/foo,/bar,/big/test/baz,/metric",
+			metricNames:          []string{"/foo", "/bar", "/big/test/baz", "/metric"},
+			incrementMetricBy:    []uint64{1, 29, 73, 991},
+			numIterations:        100,
+			errOnStartProfiling:  false,
+		},
+		{
+			name:                 "mismatched names",
+			profilingMetricsFlag: "/foo,/fighter,/big/test/baz,/metric",
+			metricNames:          []string{"/foo", "/bar", "/big/test/baz", "/metric"},
+			incrementMetricBy:    []uint64{},
+			numIterations:        0,
+			errOnStartProfiling:  true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			defer resetTest()
+			const profilingRate = 1000 * time.Microsecond
+			numMetrics := len(test.metricNames)
+
+			metrics := make([]*Uint64Metric, numMetrics)
+			for i, m := range test.metricNames {
+				newMetric, err := NewUint64Metric(m, true, pb.MetricMetadata_UNITS_NANOSECONDS, fooDescription)
+				metrics[i] = newMetric
+				if err != nil {
+					t.Fatalf("NewUint64Metric got err '%v' want nil", err)
+				}
+			}
+
+			f, err := os.CreateTemp(t.TempDir(), "profiling-metrics")
+			if err != nil {
+				t.Fatalf("failed to create file: '%v'", err)
+			}
+			fName := f.Name()
+			ProfilingMetricWriter = f
+
+			if err := Initialize(); err != nil {
+				t.Fatalf("Initialize error: got '%v' want nil", err)
+			}
+			if err := StartProfilingMetrics(test.profilingMetricsFlag, profilingRate); err != nil {
+				if test.errOnStartProfiling {
+					return
+				}
+				t.Fatalf("StartProfilingMetrics error: got '%v' want '%v'", err, test.errOnStartProfiling)
+			}
+			if test.errOnStartProfiling {
+				t.Fatal("did not error out on StartProflingMetrics as expected")
+			}
+
+			// Generate some test data
+			for i := 0; i < int(test.numIterations); i++ {
+				for metricIdx, m := range metrics {
+					m.IncrementBy(test.incrementMetricBy[metricIdx])
+				}
+				// Give time to the collector to record it.
+				time.Sleep(profilingRate)
+			}
+
+			StopProfilingMetrics()
+
+			f, err = os.Open(fName)
+			if err != nil {
+				t.Fatalf("failed to open file a second time: %v", err)
+			}
+
+			// Check the header
+			lines := bufio.NewScanner(f)
+			expectedHeader := "Time (ns)\t" + strings.Join(test.metricNames, "\t")
+			lines.Scan()
+			header := lines.Text()
+			if header != expectedHeader {
+				t.Fatalf("header mismatch: got '%s' want '%s'", header, expectedHeader)
+			}
+
+			// Check that data looks sane:
+			// - Each timestamp should always be bigger.
+			// - Each metric value should be at least as big as the previous.
+			prevTS := uint64(0)
+			prevValues := make([]uint64, numMetrics)
+			numDatapoints := 0
+			for lines.Scan() {
+				line := lines.Text()
+				numDatapoints++
+				items := strings.Split(line, "\t")
+				if len(items) != (numMetrics + 1) {
+					t.Fatalf("incorrect number of items on line '%s': got %d, want %d", line, len(items), numMetrics+1)
+				}
+				// Check timestamp
+				ts, err := strconv.ParseUint(items[0], 10, 64)
+				if err != nil {
+					t.Errorf("ts ParseUint error on line '%s': got '%v' want nil", line, err)
+				}
+				if ts <= prevTS && numDatapoints > 1 {
+					t.Errorf("expecting timestamp to always increase on line '%s': got %d, previous was %d", line, ts, prevTS)
+				}
+				prevTS = ts
+
+				// Check metric values
+				for i := 1; i <= numMetrics; i++ {
+					m, err := strconv.ParseUint(items[i], 10, 64)
+					if err != nil {
+						t.Errorf("m ParseUint error on line '%s': got '%v' want nil", line, err)
+					}
+					if m < prevValues[i-1] {
+						t.Errorf("expecting metric value to always increase on line '%s': got %d, previous was %d", line, m, prevValues[i-1])
+					}
+					prevValues[i-1] = m
+				}
+			}
+			expectedMinNumDatapoints := int(0.7 * float32(test.numIterations))
+			if numDatapoints < expectedMinNumDatapoints {
+				t.Errorf("numDatapoints: got %d, want at least %d", numDatapoints, expectedMinNumDatapoints)
+			}
+			// Check that the final total for each metric is correct
+			for i := 0; i < numMetrics; i++ {
+				expected := test.numIterations * test.incrementMetricBy[i]
+				if prevValues[i] != expected {
+					t.Errorf("incorrect final metric value: got %d, want %d", prevValues[i], expected)
+				}
+			}
+			f.Close()
+		})
 	}
 }

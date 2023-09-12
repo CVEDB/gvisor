@@ -37,6 +37,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/link/fdbased"
 	"gvisor.dev/gvisor/pkg/tcpip/link/qdisc/fifo"
+	"gvisor.dev/gvisor/pkg/tcpip/link/sniffer"
 	"gvisor.dev/gvisor/pkg/tcpip/network/arp"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
@@ -59,7 +60,7 @@ var (
 	iface              = flag.String("iface", "", "network interface name to bind for netstack")
 	sack               = flag.Bool("sack", false, "enable SACK support for netstack")
 	rack               = flag.Bool("rack", false, "enable RACK in TCP")
-	moderateRecvBuf    = flag.Bool("moderate_recv_buf", false, "enable TCP Receive Buffer Auto-tuning")
+	moderateRecvBuf    = flag.Bool("moderate_recv_buf", true, "enable TCP Receive Buffer Auto-tuning")
 	cubic              = flag.Bool("cubic", false, "enable use of CUBIC congestion control for netstack")
 	gso                = flag.Int("gso", 0, "GSO maximum size")
 	swgso              = flag.Bool("swgso", false, "gVisor-level GSO")
@@ -72,6 +73,8 @@ var (
 	mutexprofile       = flag.String("mutexprofile", "", "write a mutex profile to the specified file.")
 	traceprofile       = flag.String("traceprofile", "", "write a 5s trace of the benchmark to the specified file.")
 	useIpv6            = flag.Bool("ipv6", false, "use ipv6 instead of ipv4.")
+	sniff              = flag.Bool("sniff", false, "log sniffed packets")
+	useXDP             = flag.Bool("xdp", false, "use AF_XDP as a link enpoint instead of fdbased")
 )
 
 type impl interface {
@@ -157,36 +160,34 @@ func setupNetwork(ifaceName string, numChannels int) (fds []int, err error) {
 }
 
 func newNetstackImpl(mode string) (impl, error) {
-	fds, err := setupNetwork(*iface, runtime.GOMAXPROCS(-1))
-	if err != nil {
-		return nil, err
-	}
-
 	// Parse details.
-	parsedAddr := tcpip.Address(net.ParseIP(*addr).To4())
+	var parsedAddr tcpip.Address
 	if *useIpv6 {
-		parsedAddr = tcpip.Address(net.ParseIP(*addr).To16())
+		parsedAddr = tcpip.AddrFrom16Slice(net.ParseIP(*addr).To16())
+	} else {
+		parsedAddr = tcpip.AddrFrom4Slice(net.ParseIP(*addr).To4())
 	}
-	parsedDest := tcpip.Address("")      // Filled in below.
-	parsedMask := tcpip.AddressMask("")  // Filled in below.
-	parsedDest6 := tcpip.Address("")     // Filled in below.
-	parsedMask6 := tcpip.AddressMask("") // Filled in below.
+	parsedBytes := parsedAddr.AsSlice()
+	var parsedDest tcpip.Address      // Filled in below.
+	var parsedMask tcpip.AddressMask  // Filled in below.
+	var parsedDest6 tcpip.Address     // Filled in below.
+	var parsedMask6 tcpip.AddressMask // Filled in below.
 	switch *mask {
 	case 8:
-		parsedDest = tcpip.Address([]byte{parsedAddr[0], 0, 0, 0})
-		parsedMask = tcpip.AddressMask([]byte{0xff, 0, 0, 0})
-		parsedDest6 = tcpip.Address(append([]byte{parsedAddr[0]}, make([]byte, 15)...))
-		parsedMask6 = tcpip.AddressMask(append([]byte{0xff}, make([]byte, 15)...))
+		parsedDest = tcpip.AddrFrom4([4]byte{parsedBytes[0], 0, 0, 0})
+		parsedMask = tcpip.MaskFromBytes([]byte{0xff, 0, 0, 0})
+		parsedDest6 = tcpip.AddrFrom16Slice(append([]byte{parsedBytes[0]}, make([]byte, 15)...))
+		parsedMask6 = tcpip.MaskFromBytes(append([]byte{0xff}, make([]byte, 15)...))
 	case 16:
-		parsedDest = tcpip.Address([]byte{parsedAddr[0], parsedAddr[1], 0, 0})
-		parsedMask = tcpip.AddressMask([]byte{0xff, 0xff, 0, 0})
-		parsedDest6 = tcpip.Address(append([]byte{parsedAddr[0], parsedAddr[1]}, make([]byte, 14)...))
-		parsedMask6 = tcpip.AddressMask(append([]byte{0xff, 0xff}, make([]byte, 14)...))
+		parsedDest = tcpip.AddrFrom4([4]byte{parsedBytes[0], parsedBytes[1], 0, 0})
+		parsedMask = tcpip.MaskFromBytes([]byte{0xff, 0xff, 0, 0})
+		parsedDest6 = tcpip.AddrFrom16Slice(append([]byte{parsedBytes[0], parsedBytes[1]}, make([]byte, 14)...))
+		parsedMask6 = tcpip.MaskFromBytes(append([]byte{0xff, 0xff}, make([]byte, 14)...))
 	case 24:
-		parsedDest = tcpip.Address([]byte{parsedAddr[0], parsedAddr[1], parsedAddr[2], 0})
-		parsedMask = tcpip.AddressMask([]byte{0xff, 0xff, 0xff, 0})
-		parsedDest6 = tcpip.Address(append([]byte{parsedAddr[0], parsedAddr[1], parsedAddr[2]}, make([]byte, 13)...))
-		parsedMask6 = tcpip.AddressMask(append([]byte{0xff, 0xff, 0xff}, make([]byte, 13)...))
+		parsedDest = tcpip.AddrFrom4([4]byte{parsedBytes[0], parsedBytes[1], parsedBytes[2], 0})
+		parsedMask = tcpip.MaskFromBytes([]byte{0xff, 0xff, 0xff, 0})
+		parsedDest6 = tcpip.AddrFrom16Slice(append([]byte{parsedBytes[0], parsedBytes[1], parsedBytes[2]}, make([]byte, 13)...))
+		parsedMask6 = tcpip.MaskFromBytes(append([]byte{0xff, 0xff, 0xff}, make([]byte, 13)...))
 	default:
 		// This is just laziness; we don't expect a different mask.
 		return nil, fmt.Errorf("mask %d not supported", mask)
@@ -205,25 +206,40 @@ func newNetstackImpl(mode string) (impl, error) {
 	rand.Read(mac) // Fill with random data.
 	mac[0] &^= 0x1 // Clear multicast bit.
 	mac[0] |= 0x2  // Set local assignment bit (IEEE802).
-	ep, err := fdbased.New(&fdbased.Options{
-		FDs:            fds,
-		MTU:            uint32(*mtu),
-		EthernetHeader: true,
-		Address:        tcpip.LinkAddress(mac),
-		// Enable checksum generation as we need to generate valid
-		// checksums for the veth device to deliver our packets to the
-		// peer. But we do want to disable checksum verification as veth
-		// devices do perform GRO and the linux host kernel may not
-		// regenerate valid checksums after GRO.
-		TXChecksumOffload: false,
-		RXChecksumOffload: true,
-		//PacketDispatchMode: fdbased.RecvMMsg,
-		PacketDispatchMode: fdbased.PacketMMap,
-		GSOMaxSize:         uint32(*gso),
-		GvisorGSOEnabled:   *swgso,
-	})
+	var ep stack.LinkEndpoint
+	var err error
+	if *useXDP {
+		ep, err = newXDPEndpoint(*iface, mac)
+	} else {
+		var fds []int
+		fds, err = setupNetwork(*iface, runtime.GOMAXPROCS(0))
+		if err != nil {
+			return nil, err
+		}
+		ep, err = fdbased.New(&fdbased.Options{
+			FDs:            fds,
+			MTU:            uint32(*mtu),
+			EthernetHeader: true,
+			Address:        tcpip.LinkAddress(mac),
+			// Enable checksum generation as we need to generate valid
+			// checksums for the veth device to deliver our packets to the
+			// peer. But we do want to disable checksum verification as veth
+			// devices do perform GRO and the linux host kernel may not
+			// regenerate valid checksums after GRO.
+			TXChecksumOffload: false,
+			RXChecksumOffload: true,
+			//PacketDispatchMode: fdbased.RecvMMsg,
+			PacketDispatchMode: fdbased.PacketMMap,
+			GSOMaxSize:         uint32(*gso),
+			GvisorGSOEnabled:   *swgso,
+		})
+	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create FD endpoint: %v", err)
+		return nil, fmt.Errorf("failed to create endpoint: %v", err)
+	}
+
+	if *sniff {
+		ep = sniffer.New(ep)
 	}
 
 	qDisc := fifo.New(ep, runtime.GOMAXPROCS(0), 1000)
@@ -315,13 +331,9 @@ func (n netstackImpl) dial(address string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	hostAddr := net.ParseIP(host).To4()
-	if *useIpv6 {
-		hostAddr = net.ParseIP(host).To16()
-	}
 	addr := tcpip.FullAddress{
 		NIC:  nicID,
-		Addr: tcpip.Address(hostAddr),
+		Addr: tcpip.AddrFromSlice(net.ParseIP(host)),
 		Port: uint16(portNumber),
 	}
 	proto := ipv4.ProtocolNumber
@@ -484,88 +496,88 @@ func main() {
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, unix.SIGTERM)
+
+	// Accept connections and proxy data between them.
 	go func() {
-		<-sigs
-		if *cpuprofile != "" {
-			pprof.StopCPUProfile()
-		}
-		if *memprofile != "" {
-			f, err := os.Create(*memprofile)
+		for {
+			// Forward all connections.
+			inConn, err := listener.Accept()
 			if err != nil {
-				log.Fatal("could not create memory profile: ", err)
+				// This should not happen; we are listening
+				// successfully. Exhausted all available FDs?
+				log.Fatalf("accept error: %v", err)
 			}
-			defer func() {
-				if err := f.Close(); err != nil {
-					log.Print("error closing memory profile: ", err)
+			log.Printf("incoming connection established.")
+
+			// Copy both ways.
+			go io.Copy(inConn, next)
+			go io.Copy(next, inConn)
+
+			// Print stats every second.
+			go func() {
+				t := time.NewTicker(time.Second)
+				defer t.Stop()
+				for {
+					<-t.C
+					in.printStats()
+					out.printStats()
 				}
 			}()
-			runtime.GC() // get up-to-date statistics
-			if err := pprof.WriteHeapProfile(f); err != nil {
-				log.Fatalf("Unable to write heap profile: %v", err)
-			}
-		}
-		if *blockprofile != "" {
-			f, err := os.Create(*blockprofile)
-			if err != nil {
-				log.Fatal("could not create block profile: ", err)
-			}
-			defer func() {
-				if err := f.Close(); err != nil {
-					log.Print("error closing block profile: ", err)
+
+			for {
+				// Dial again.
+				next, err = out.dial(*forward)
+				if err == nil {
+					break
 				}
-			}()
-			if err := pprof.Lookup("block").WriteTo(f, 0); err != nil {
-				log.Fatalf("Unable to write block profile: %v", err)
 			}
 		}
-		if *mutexprofile != "" {
-			f, err := os.Create(*mutexprofile)
-			if err != nil {
-				log.Fatal("could not create mutex profile: ", err)
-			}
-			defer func() {
-				if err := f.Close(); err != nil {
-					log.Print("error closing mutex profile: ", err)
-				}
-			}()
-			if err := pprof.Lookup("mutex").WriteTo(f, 0); err != nil {
-				log.Fatalf("Unable to write mutex profile: %v", err)
-			}
-		}
-		os.Exit(0)
 	}()
 
-	for {
-		// Forward all connections.
-		inConn, err := listener.Accept()
+	// Wait for the SIGTERM notifying us to stop.
+	<-sigs
+
+	if *memprofile != "" {
+		f, err := os.Create(*memprofile)
 		if err != nil {
-			// This should not happen; we are listening
-			// successfully. Exhausted all available FDs?
-			log.Fatalf("accept error: %v", err)
+			log.Fatal("could not create memory profile: ", err)
 		}
-		log.Printf("incoming connection established.")
-
-		// Copy both ways.
-		go io.Copy(inConn, next)
-		go io.Copy(next, inConn)
-
-		// Print stats every second.
-		go func() {
-			t := time.NewTicker(time.Second)
-			defer t.Stop()
-			for {
-				<-t.C
-				in.printStats()
-				out.printStats()
+		defer func() {
+			if err := f.Close(); err != nil {
+				log.Print("error closing memory profile: ", err)
 			}
 		}()
-
-		for {
-			// Dial again.
-			next, err = out.dial(*forward)
-			if err == nil {
-				break
+		runtime.GC() // get up-to-date statistics
+		if err := pprof.WriteHeapProfile(f); err != nil {
+			log.Fatalf("Unable to write heap profile: %v", err)
+		}
+	}
+	if *blockprofile != "" {
+		f, err := os.Create(*blockprofile)
+		if err != nil {
+			log.Fatal("could not create block profile: ", err)
+		}
+		defer func() {
+			if err := f.Close(); err != nil {
+				log.Print("error closing block profile: ", err)
 			}
+		}()
+		if err := pprof.Lookup("block").WriteTo(f, 0); err != nil {
+			log.Fatalf("Unable to write block profile: %v", err)
+		}
+	}
+	if *mutexprofile != "" {
+		f, err := os.Create(*mutexprofile)
+		if err != nil {
+			log.Fatal("could not create mutex profile: ", err)
+		}
+		defer func() {
+			if err := f.Close(); err != nil {
+				log.Print("error closing mutex profile: ", err)
+			}
+		}()
+		if err := pprof.Lookup("mutex").WriteTo(f, 0); err != nil {
+			log.Fatalf("Unable to write mutex profile: %v", err)
 		}
 	}
 }

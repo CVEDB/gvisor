@@ -176,7 +176,7 @@ func TestMultiContainerSanity(t *testing.T) {
 // TestMultiPIDNS checks that it is possible to run 2 dead-simple containers in
 // the same sandbox with different pidns.
 func TestMultiPIDNS(t *testing.T) {
-	for name, conf := range configs(t, false /* noOverlay */) {
+	for name, conf := range configs(t, true /* noOverlay */) {
 		t.Run(name, func(t *testing.T) {
 			rootDir, cleanup, err := testutil.SetupRootDir()
 			if err != nil {
@@ -248,7 +248,7 @@ func TestMultiPIDNS(t *testing.T) {
 
 // TestMultiPIDNSPath checks the pidns path.
 func TestMultiPIDNSPath(t *testing.T) {
-	for name, conf := range configs(t, false /* noOverlay */) {
+	for name, conf := range configs(t, true /* noOverlay */) {
 		t.Run(name, func(t *testing.T) {
 			rootDir, cleanup, err := testutil.SetupRootDir()
 			if err != nil {
@@ -366,7 +366,7 @@ func TestMultiPIDNSKill(t *testing.T) {
 		t.Fatal("error finding test_app:", err)
 	}
 
-	for name, conf := range configs(t, false /* noOverlay */) {
+	for name, conf := range configs(t, true /* noOverlay */) {
 		t.Run(name, func(t *testing.T) {
 			rootDir, cleanup, err := testutil.SetupRootDir()
 			if err != nil {
@@ -446,6 +446,93 @@ func TestMultiPIDNSKill(t *testing.T) {
 				if !strings.Contains(err.Error(), "belongs to a different container") {
 					t.Errorf("wrong error message from killing another container's: %v", err)
 				}
+			}
+		})
+	}
+}
+
+// TestMultiPIDNSRoot checks that the sandbox PID namespace can be used to
+// reference the root PID namespace of the sandbox.
+func TestMultiPIDNSRoot(t *testing.T) {
+	for name, conf := range configs(t, true /* noOverlay */) {
+		t.Run(name, func(t *testing.T) {
+			rootDir, cleanup, err := testutil.SetupRootDir()
+			if err != nil {
+				t.Fatalf("error creating root dir: %v", err)
+			}
+			defer cleanup()
+			conf.RootDir = rootDir
+
+			// Setup the containers. One in the root PID namespace and another in a
+			// sub-namespace.
+			sleep := []string{"sleep", "100"}
+			testSpecs, ids := createSpecs(sleep, sleep, sleep)
+			testSpecs[1].Linux = &specs.Linux{
+				Namespaces: []specs.LinuxNamespace{
+					{
+						Type: "pid",
+						Path: "/proc/1/ns/pid",
+					},
+				},
+			}
+
+			// Start 2 containers first, and use the 3rd to join the sandbox pidns.
+			delayedSpec, delayedID := testSpecs[2], ids[2]
+			testSpecs = testSpecs[:2]
+			ids = ids[:2]
+
+			containers, cleanup, err := startContainers(conf, testSpecs, ids)
+			if err != nil {
+				t.Fatalf("error starting containers: %v", err)
+			}
+			defer cleanup()
+
+			delayedSpec.Linux = &specs.Linux{
+				Namespaces: []specs.LinuxNamespace{
+					{
+						Type: "pid",
+						Path: fmt.Sprintf("/proc/%d/ns/pid", containers[0].SandboxPid()),
+					},
+				},
+			}
+			delayed, cleanup, err := startContainers(conf, []*specs.Spec{delayedSpec}, []string{delayedID})
+			if err != nil {
+				t.Fatalf("error starting sub-container: %v", err)
+			}
+			defer cleanup()
+
+			// Wait for all container processes to be up and running.
+			expectedPL := []*control.Process{
+				newProcessBuilder().PID(1).PPID(0).Cmd("sleep").Process(),
+			}
+			if err := waitForProcessList(containers[0], expectedPL); err != nil {
+				t.Errorf("failed to wait for sleep to start: %v", err)
+			}
+			expectedPL = []*control.Process{
+				newProcessBuilder().PID(2).PPID(0).Cmd("sleep").Process(),
+			}
+			if err := waitForProcessList(containers[1], expectedPL); err != nil {
+				t.Fatalf("failed to wait for sleep to start: %v", err)
+			}
+			expectedPL = []*control.Process{
+				newProcessBuilder().PID(3).PPID(0).Cmd("sleep").Process(),
+			}
+			if err := waitForProcessList(delayed[0], expectedPL); err != nil {
+				t.Fatalf("failed to wait for sleep to start: %v", err)
+			}
+
+			// Check that delayer container is running in the root PID namespace and
+			// can see all other processes.
+			expectedPL = []*control.Process{
+				newProcessBuilder().PID(1).Cmd("sleep").Process(),
+				newProcessBuilder().PID(2).Cmd("sleep").Process(),
+				newProcessBuilder().PID(3).Cmd("sleep").Process(),
+				newProcessBuilder().Cmd("ps").Process(),
+			}
+			if got, err := execPS(conf, delayed[0]); err != nil {
+				t.Fatal(err)
+			} else if !procListsEqual(got, expectedPL) {
+				t.Fatalf("container got process list: %s, want: %s", procListToString(got), procListToString(expectedPL))
 			}
 		})
 	}
@@ -1086,7 +1173,7 @@ func TestMultiContainerDifferentFilesystems(t *testing.T) {
 
 	// Make sure overlay is enabled, and none of the root filesystems are
 	// read-only, otherwise we won't be able to create the file.
-	conf.Overlay2 = config.Overlay2{RootMount: true, SubMounts: true, Medium: "memory"}
+	conf.Overlay2.Set("all:memory")
 	specs, ids := createSpecs(cmdRoot, cmd, cmd)
 	for _, s := range specs {
 		s.Root.Readonly = false
@@ -1986,7 +2073,7 @@ func TestMultiContainerEvent(t *testing.T) {
 	conf.RootDir = rootDir
 
 	// Setup the containers.
-	sleep := []string{"/bin/sleep", "100"}
+	sleep := []string{"/bin/sh", "-c", "/bin/sleep 100 | grep 123"}
 	busy := []string{"/bin/bash", "-c", "i=0 ; while true ; do (( i += 1 )) ; done"}
 	quick := []string{"/bin/true"}
 	podSpec, ids := createSpecs(sleep, busy, quick)
@@ -2000,26 +2087,19 @@ func TestMultiContainerEvent(t *testing.T) {
 	t.Logf("Running container busy %s", containers[1].ID)
 	t.Logf("Running container quick %s", containers[2].ID)
 
-	// Wait for last container to stabilize the process count that is
-	// checked further below.
+	// Wait for containers to start (last container should complete).
+	if err := waitForProcessCount(containers[0], 3); err != nil {
+		t.Errorf("failed to wait for sleep to start: %v", err)
+	}
+	if err := waitForProcessCount(containers[1], 1); err != nil {
+		t.Errorf("failed to wait for bash to start: %v", err)
+	}
 	if ws, err := containers[2].Wait(); err != nil || ws != 0 {
 		t.Fatalf("Container.Wait, status: %v, err: %v", ws, err)
 	}
-	expectedPL := []*control.Process{
-		newProcessBuilder().Cmd("sleep").Process(),
-	}
-	if err := waitForProcessList(containers[0], expectedPL); err != nil {
-		t.Errorf("failed to wait for sleep to start: %v", err)
-	}
-	expectedPL = []*control.Process{
-		newProcessBuilder().Cmd("bash").Process(),
-	}
-	if err := waitForProcessList(containers[1], expectedPL); err != nil {
-		t.Errorf("failed to wait for bash to start: %v", err)
-	}
 
 	// Check events for running containers.
-	for _, cont := range containers[:2] {
+	for i, cont := range containers[:2] {
 		ret, err := cont.Event()
 		if err != nil {
 			t.Errorf("Container.Event(%q): %v", cont.ID, err)
@@ -2031,9 +2111,25 @@ func TestMultiContainerEvent(t *testing.T) {
 		if cont.ID != evt.ID {
 			t.Errorf("Wrong container ID, want: %s, got: %s", cont.ID, evt.ID)
 		}
-		// One process per remaining container.
-		if got, want := evt.Data.Pids.Current, uint64(2); got != want {
-			t.Errorf("Wrong number of PIDs, cid: %q, want: %d, got: %d", cont.ID, want, got)
+
+		// container[0] expects 3 processes, while container[1] expects 1.
+		wantPids := 3
+		if i == 1 {
+			wantPids = 1
+		}
+		if got := evt.Data.Pids.Current; got != uint64(wantPids) {
+			t.Errorf("Wrong number of PIDs, cid: %q, want: %d, got: %d", cont.ID, wantPids, got)
+		}
+
+		switch i {
+		case 0:
+			if evt.Data.Memory.Usage.Usage != uint64(0) {
+				t.Errorf("root container should report 0 memory usage, got: %v", evt.Data.Memory.Usage.Usage)
+			}
+		case 1:
+			if evt.Data.Memory.Usage.Usage == uint64(0) {
+				t.Error("sub-container should report non-zero memory usage")
+			}
 		}
 
 		// The exited container should always have a usage of zero.
@@ -2231,10 +2327,7 @@ func TestMultiContainerOverlayLeaks(t *testing.T) {
 	conf.RootDir = rootDir
 
 	// Configure root overlay backed by rootfs itself.
-	conf.Overlay2 = config.Overlay2{
-		RootMount: true,
-		Medium:    "self",
-	}
+	conf.Overlay2.Set("root:self")
 
 	// Root container will just sleep.
 	sleep := []string{"sleep", "100"}
@@ -2336,10 +2429,7 @@ func TestMultiContainerMemoryLeakStress(t *testing.T) {
 
 	// Configure root overlay (backed by memory) so that containers can create
 	// files in the root directory.
-	conf.Overlay2 = config.Overlay2{
-		RootMount: true,
-		Medium:    "memory",
-	}
+	conf.Overlay2.Set("root:memory")
 
 	// Root container will just sleep.
 	sleep := []string{"sleep", "1000"}

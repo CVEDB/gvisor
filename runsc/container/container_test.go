@@ -40,8 +40,10 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/platform"
+	"gvisor.dev/gvisor/pkg/state/statefile"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/test/testutil"
+	"gvisor.dev/gvisor/runsc/boot"
 	"gvisor.dev/gvisor/runsc/cgroup"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/flag"
@@ -416,7 +418,7 @@ func configs(t *testing.T, noOverlay bool) map[string]*config.Config {
 	cs := make(map[string]*config.Config)
 	for _, p := range ps {
 		c := testutil.TestConfig(t)
-		c.Overlay2 = config.Overlay2{RootMount: false, SubMounts: false, Medium: ""}
+		c.Overlay2.Set("none")
 		c.Platform = p
 		cs[p] = c
 	}
@@ -426,7 +428,7 @@ func configs(t *testing.T, noOverlay bool) map[string]*config.Config {
 		for _, p := range ps {
 			c := testutil.TestConfig(t)
 			c.Platform = p
-			c.Overlay2 = config.Overlay2{RootMount: true, SubMounts: true, Medium: "memory"}
+			c.Overlay2.Set("all:memory")
 			cs[p+"-overlay"] = c
 		}
 	}
@@ -621,12 +623,14 @@ func TestExePath(t *testing.T) {
 		t.Fatalf("error making directory: %v", err)
 	}
 
+	defaultConf := testutil.TestConfig(t)
+	defaultConf.Overlay2.Set("none")
+	overlayConf := testutil.TestConfig(t)
+	overlayConf.Overlay2.Set("all:memory")
 	configs := map[string]*config.Config{
-		"default": testutil.TestConfig(t),
-		"overlay": testutil.TestConfig(t),
+		"default": defaultConf,
+		"overlay": overlayConf,
 	}
-	configs["default"].Overlay2 = config.Overlay2{RootMount: false, SubMounts: false, Medium: ""}
-	configs["overlay"].Overlay2 = config.Overlay2{RootMount: true, SubMounts: true, Medium: "memory"}
 
 	for name, conf := range configs {
 		t.Run(name, func(t *testing.T) {
@@ -1073,7 +1077,7 @@ func TestCheckpointRestore(t *testing.T) {
 			}
 
 			// Checkpoint running container; save state into new file.
-			if err := cont.Checkpoint(file); err != nil {
+			if err := cont.Checkpoint(file, statefile.Options{Compression: statefile.CompressionLevelFlateBestSpeed}); err != nil {
 				t.Fatalf("error checkpointing container to empty file: %v", err)
 			}
 			defer os.RemoveAll(imagePath)
@@ -1093,7 +1097,8 @@ func TestCheckpointRestore(t *testing.T) {
 			}
 			defer outputFile2.Close()
 
-			// Restore into a new container.
+			// Restore into a new container with different ID (e.g. clone). Keep the
+			// initial container running to ensure no conflict with it.
 			args2 := Args{
 				ID:        testutil.RandomContainerID(),
 				Spec:      spec,
@@ -1105,7 +1110,7 @@ func TestCheckpointRestore(t *testing.T) {
 			}
 			defer cont2.Destroy()
 
-			if err := cont2.Restore(spec, conf, imagePath); err != nil {
+			if err := cont2.Restore(conf, imagePath); err != nil {
 				t.Fatalf("error restoring container: %v", err)
 			}
 
@@ -1119,14 +1124,19 @@ func TestCheckpointRestore(t *testing.T) {
 				t.Fatalf("error with outputFile: %v", err)
 			}
 
-			// Check that lastNum is one less than firstNum and that the container picks
-			// up from where it left off.
+			// Check that lastNum is one less than firstNum and that the container
+			// picks up from where it left off.
 			if lastNum+1 != firstNum {
 				t.Errorf("error numbers not in order, previous: %d, next: %d", lastNum, firstNum)
 			}
 			cont2.Destroy()
+			cont2 = nil
 
-			// Restore into another container!
+			// Restore into a container using the same ID (e.g. save/resume). It requires
+			// the original container to cease to exist because they share the same identity.
+			cont.Destroy()
+			cont = nil
+
 			// Delete and recreate file before restoring.
 			if err := os.Remove(outputPath); err != nil {
 				t.Fatalf("error removing file")
@@ -1137,19 +1147,13 @@ func TestCheckpointRestore(t *testing.T) {
 			}
 			defer outputFile3.Close()
 
-			// Restore into a new container.
-			args3 := Args{
-				ID:        testutil.RandomContainerID(),
-				Spec:      spec,
-				BundleDir: bundleDir,
-			}
-			cont3, err := New(conf, args3)
+			cont3, err := New(conf, args)
 			if err != nil {
 				t.Fatalf("error creating container: %v", err)
 			}
 			defer cont3.Destroy()
 
-			if err := cont3.Restore(spec, conf, imagePath); err != nil {
+			if err := cont3.Restore(conf, imagePath); err != nil {
 				t.Fatalf("error restoring container: %v", err)
 			}
 
@@ -1163,8 +1167,8 @@ func TestCheckpointRestore(t *testing.T) {
 				t.Fatalf("error with outputFile: %v", err)
 			}
 
-			// Check that lastNum is one less than firstNum and that the container picks
-			// up from where it left off.
+			// Check that lastNum is one less than firstNum and that the container
+			// picks up from where it left off.
 			if lastNum+1 != firstNum2 {
 				t.Errorf("error numbers not in order, previous: %d, next: %d", lastNum, firstNum2)
 			}
@@ -1252,7 +1256,7 @@ func TestUnixDomainSockets(t *testing.T) {
 			}
 
 			// Checkpoint running container; save state into new file.
-			if err := cont.Checkpoint(file); err != nil {
+			if err := cont.Checkpoint(file, statefile.Options{Compression: statefile.CompressionLevelFlateBestSpeed}); err != nil {
 				t.Fatalf("error checkpointing container to empty file: %v", err)
 			}
 
@@ -1284,7 +1288,7 @@ func TestUnixDomainSockets(t *testing.T) {
 			}
 			defer contRestore.Destroy()
 
-			if err := contRestore.Restore(spec, conf, imagePath); err != nil {
+			if err := contRestore.Restore(conf, imagePath); err != nil {
 				t.Fatalf("error restoring container: %v", err)
 			}
 
@@ -3030,5 +3034,96 @@ func TestExecFDExec(t *testing.T) {
 	}
 	if want := "hello world\n"; string(got) != want {
 		t.Errorf("echo result, got: %q, want: %q", got, want)
+	}
+}
+
+// This test checks that a bind mount which is annotated to be fully owned by
+// the sandbox is overlaid using "self" overlay medium.
+func TestOverlayByMountAnnotation(t *testing.T) {
+	conf := testutil.TestConfig(t)
+	// Disable overlay settings.
+	conf.Overlay2.Set("none")
+
+	// We just sleep here because we want to test execution in an already
+	// running container.
+	spec := testutil.NewSpecWithArgs("bash", "-c", "sleep infinity")
+
+	// Set up a bind mount at "/submount".
+	subMount, err := ioutil.TempDir(testutil.TmpDir(), "submount")
+	if err != nil {
+		t.Fatalf("ioutil.TempDir failed: %v", err)
+	}
+	defer os.RemoveAll(subMount)
+	spec.Mounts = append(spec.Mounts, specs.Mount{
+		Destination: subMount,
+		Source:      subMount,
+		Type:        "bind",
+	})
+
+	// Add mount annotation to self-overlay the submount.
+	volumeName := "mount1"
+	if spec.Annotations == nil {
+		spec.Annotations = make(map[string]string)
+	}
+	spec.Annotations[boot.MountPrefix+volumeName+".source"] = subMount
+	spec.Annotations[boot.MountPrefix+volumeName+".type"] = "bind"
+	spec.Annotations[boot.MountPrefix+volumeName+".share"] = "container"
+	spec.Annotations[boot.MountPrefix+volumeName+".lifecycle"] = "pod"
+
+	_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+	if err != nil {
+		t.Fatalf("error setting up container: %v", err)
+	}
+	defer cleanup()
+
+	args := Args{
+		ID:        testutil.RandomContainerID(),
+		Spec:      spec,
+		BundleDir: bundleDir,
+	}
+
+	cont, err := New(conf, args)
+	if err != nil {
+		t.Fatalf("Creating container: %v", err)
+	}
+	destroyed := false
+	destroy := func() {
+		if destroyed {
+			return
+		}
+		destroyed = true
+		cont.Destroy()
+	}
+	defer destroy()
+
+	if err := cont.Start(conf); err != nil {
+		t.Fatalf("starting container: %v", err)
+	}
+
+	// Create a file in submount with a few bytes.
+	testFilePath := path.Join(subMount, "testfile")
+	if ws, err := execute(conf, cont, "/bin/sh", "-c", "echo hello > "+testFilePath); err != nil || ws != 0 {
+		t.Fatalf("exec command failed to write a file in submount, ws: %v, err: %v", ws, err)
+	}
+
+	// Check that the filestore file is created and is not empty.
+	filestoreFile := boot.SelfOverlayFilestorePath(subMount, cont.Sandbox.ID)
+	var stat unix.Stat_t
+	if err := unix.Stat(filestoreFile, &stat); err != nil {
+		t.Fatalf("unix.Stat(%q) failed for submount filestore: %v", filestoreFile, err)
+	}
+	if stat.Blocks == 0 {
+		t.Errorf("submount filestore file %q is empty", filestoreFile)
+	}
+
+	// Check that the file is not created on the host.
+	if err := unix.Stat(path.Join(subMount, testFilePath), &stat); err == nil {
+		t.Errorf("%q file created on the host in spite of overlay", testFilePath)
+	}
+
+	// Destroying the container should delete the filestore file.
+	destroy()
+	if err := unix.Stat(filestoreFile, &stat); err == nil {
+		t.Fatalf("overlay filestore at %q was not deleted after container.Destroy()", filestoreFile)
 	}
 }

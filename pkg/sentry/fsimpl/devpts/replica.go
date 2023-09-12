@@ -35,6 +35,7 @@ type replicaInode struct {
 	implStatFS
 	kernfs.InodeAttrs
 	kernfs.InodeNoopRefCount
+	kernfs.InodeNotAnonymous
 	kernfs.InodeNotDirectory
 	kernfs.InodeNotSymlink
 	kernfs.InodeWatches
@@ -69,6 +70,7 @@ func (ri *replicaInode) Open(ctx context.Context, rp *vfs.ResolvingPath, d *kern
 		// ignored silently.
 		_ = t.ThreadGroup().SetControllingTTY(fd.inode.t.replicaKTTY, false /* steal */, fd.vfsfd.IsReadable())
 	}
+	ri.t.ld.replicaOpen()
 	return &fd.vfsfd, nil
 
 }
@@ -114,7 +116,9 @@ type replicaFileDescription struct {
 var _ vfs.FileDescriptionImpl = (*replicaFileDescription)(nil)
 
 // Release implements fs.FileOperations.Release.
-func (rfd *replicaFileDescription) Release(ctx context.Context) {}
+func (rfd *replicaFileDescription) Release(ctx context.Context) {
+	rfd.inode.t.ld.replicaClose()
+}
 
 // EventRegister implements waiter.Waitable.EventRegister.
 func (rfd *replicaFileDescription) EventRegister(e *waiter.Entry) error {
@@ -165,6 +169,10 @@ func (rfd *replicaFileDescription) Ioctl(ctx context.Context, io usermem.IO, sys
 		return rfd.inode.t.ld.setTermios(t, args)
 	case linux.TCSETSW:
 		// TODO(b/29356795): This should drain the output queue first.
+		return rfd.inode.t.ld.setTermios(t, args)
+	case linux.TCSETSF:
+		// TODO(b/29356795): This should drain the output queue and
+		// clear the input queue first.
 		return rfd.inode.t.ld.setTermios(t, args)
 	case linux.TIOCGPTN:
 		nP := primitive.Uint32(rfd.inode.t.n)

@@ -7,6 +7,39 @@ package(
     licenses = ["notice"],
 )
 
+go_template_instance(
+    name = "atomicptr_bucket_slice",
+    out = "atomicptr_bucket_slice_unsafe.go",
+    package = "kernel",
+    prefix = "descriptorBucketSlice",
+    template = "//pkg/sync/atomicptr:generic_atomicptr",
+    types = {
+        "Value": "descriptorBucketSlice",
+    },
+)
+
+go_template_instance(
+    name = "atomicptr_bucket",
+    out = "atomicptr_bucket_unsafe.go",
+    package = "kernel",
+    prefix = "descriptorBucket",
+    template = "//pkg/sync/atomicptr:generic_atomicptr",
+    types = {
+        "Value": "descriptorBucket",
+    },
+)
+
+go_template_instance(
+    name = "atomicptr_descriptor",
+    out = "atomicptr_descriptor_unsafe.go",
+    package = "kernel",
+    prefix = "descriptor",
+    template = "//pkg/sync/atomicptr:generic_atomicptr",
+    types = {
+        "Value": "descriptor",
+    },
+)
+
 declare_mutex(
     name = "cpu_clock_mutex",
     out = "cpu_clock_mutex.go",
@@ -34,6 +67,13 @@ declare_mutex(
     nested_lock_names = ["child"],
     package = "kernel",
     prefix = "task",
+)
+
+declare_mutex(
+    name = "task_work_mutex",
+    out = "task_work_mutex.go",
+    package = "kernel",
+    prefix = "taskWork",
 )
 
 declare_mutex(
@@ -154,17 +194,6 @@ go_template_instance(
 )
 
 go_template_instance(
-    name = "ipc_namespace_refs",
-    out = "ipc_namespace_refs.go",
-    package = "kernel",
-    prefix = "IPCNamespace",
-    template = "//pkg/refs:refs_template",
-    types = {
-        "T": "IPCNamespace",
-    },
-)
-
-go_template_instance(
     name = "process_group_refs",
     out = "process_group_refs.go",
     package = "kernel",
@@ -198,6 +227,9 @@ go_library(
     srcs = [
         "abstract_socket_namespace.go",
         "aio.go",
+        "atomicptr_bucket_slice_unsafe.go",
+        "atomicptr_bucket_unsafe.go",
+        "atomicptr_descriptor_unsafe.go",
         "cgroup.go",
         "cgroup_mutex.go",
         "context.go",
@@ -209,7 +241,6 @@ go_library(
         "fs_context.go",
         "fs_context_refs.go",
         "ipc_namespace.go",
-        "ipc_namespace_refs.go",
         "kcov.go",
         "kcov_unsafe.go",
         "kernel.go",
@@ -261,6 +292,7 @@ go_library(
         "task_syscall.go",
         "task_usermem.go",
         "task_work.go",
+        "task_work_mutex.go",
         "taskset_mutex.go",
         "thread_group.go",
         "thread_group_timer_mutex.go",
@@ -276,7 +308,6 @@ go_library(
     ],
     imports = [
         "gvisor.dev/gvisor/pkg/bpf",
-        "gvisor.dev/gvisor/pkg/sentry/device",
         "gvisor.dev/gvisor/pkg/tcpip",
     ],
     marshal = True,
@@ -308,10 +339,10 @@ go_library(
         "//pkg/safemem",
         "//pkg/secio",
         "//pkg/sentry/arch",
-        "//pkg/sentry/device",
         "//pkg/sentry/fsimpl/kernfs",
         "//pkg/sentry/fsimpl/lock",
         "//pkg/sentry/fsimpl/mqfs",
+        "//pkg/sentry/fsimpl/nsfs",
         "//pkg/sentry/fsimpl/pipefs",
         "//pkg/sentry/fsimpl/sockfs",
         "//pkg/sentry/fsimpl/timerfd",

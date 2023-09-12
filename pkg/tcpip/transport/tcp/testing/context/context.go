@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"gvisor.dev/gvisor/pkg/bufferv2"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/checker"
 	"gvisor.dev/gvisor/pkg/tcpip/checksum"
@@ -38,40 +38,43 @@ import (
 )
 
 const (
-	// StackAddr is the IPv4 address assigned to the stack.
-	StackAddr = "\x0a\x00\x00\x01"
 
 	// StackPort is used as the listening port in tests for passive
 	// connects.
 	StackPort = 1234
 
-	// TestAddr is the source address for packets sent to the stack via the
-	// link layer endpoint.
-	TestAddr = "\x0a\x00\x00\x02"
-
 	// TestPort is the TCP port used for packets sent to the stack
 	// via the link layer endpoint.
 	TestPort = 4096
 
-	// StackV6Addr is the IPv6 address assigned to the stack.
-	StackV6Addr = "\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"
-
-	// TestV6Addr is the source address for packets sent to the stack via
-	// the link layer endpoint.
-	TestV6Addr = "\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02"
-
-	// StackV4MappedAddr is StackAddr as a mapped v6 address.
-	StackV4MappedAddr = "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff" + StackAddr
-
-	// TestV4MappedAddr is TestAddr as a mapped v6 address.
-	TestV4MappedAddr = "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff" + TestAddr
-
-	// V4MappedWildcardAddr is the mapped v6 representation of 0.0.0.0.
-	V4MappedWildcardAddr = "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x00\x00"
-
 	// TestInitialSequenceNumber is the initial sequence number sent in packets that
 	// are sent in response to a SYN or in the initial SYN sent to the stack.
 	TestInitialSequenceNumber = 789
+)
+
+var (
+	// StackAddr is the IPv4 address assigned to the stack.
+	StackAddr = tcpip.AddrFromSlice([]byte("\x0a\x00\x00\x01"))
+
+	// TestAddr is the source address for packets sent to the stack via the
+	// link layer endpoint.
+	TestAddr = tcpip.AddrFromSlice([]byte("\x0a\x00\x00\x02"))
+
+	// StackV6Addr is the IPv6 address assigned to the stack.
+	StackV6Addr = tcpip.AddrFromSlice([]byte("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"))
+
+	// TestV6Addr is the source address for packets sent to the stack via
+	// the link layer endpoint.
+	TestV6Addr = tcpip.AddrFromSlice([]byte("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02"))
+
+	// StackV4MappedAddr is StackAddr as a mapped v6 address.
+	StackV4MappedAddr = tcpip.AddrFromSlice([]byte("\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff" + string(StackAddr.AsSlice())))
+
+	// TestV4MappedAddr is TestAddr as a mapped v6 address.
+	TestV4MappedAddr = tcpip.AddrFromSlice([]byte("\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff" + string(TestAddr.AsSlice())))
+
+	// V4MappedWildcardAddr is the mapped v6 representation of 0.0.0.0.
+	V4MappedWildcardAddr = tcpip.AddrFromSlice([]byte("\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x00\x00"))
 )
 
 // StackAddrWithPrefix is StackAddr with its associated prefix length.
@@ -217,6 +220,13 @@ func NewWithOpts(t *testing.T, opts Options) *Context {
 		t.Fatalf("s.SetTransportProtocolOption(%d, &%T(%d)): %s", tcp.ProtocolNumber, minRTOOpt, minRTOOpt, err)
 	}
 
+	// Many tests verify the window size. Autotuning can change that value,
+	// so we turn it off.
+	autoTuneOpt := tcpip.TCPModerateReceiveBufferOption(false)
+	if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, &autoTuneOpt); err != nil {
+		t.Fatalf("SetTransportProtocolOption(%d, &%T(%t)): %s", tcp.ProtocolNumber, autoTuneOpt, autoTuneOpt, err)
+	}
+
 	// Some of the congestion control tests send up to 640 packets, we so
 	// set the channel size to 1000.
 	ep := channel.New(1000, opts.MTU, "")
@@ -321,7 +331,7 @@ func (c *Context) CheckNoPacket(errMsg string) {
 // that it is an IPv4 packet with the expected source and destination
 // addresses. If no packet is received in the specified timeout it will return
 // nil.
-func (c *Context) GetPacketWithTimeout(timeout time.Duration) *bufferv2.View {
+func (c *Context) GetPacketWithTimeout(timeout time.Duration) *buffer.View {
 	c.t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -357,7 +367,7 @@ func (c *Context) GetPacketWithTimeout(timeout time.Duration) *bufferv2.View {
 // GetPacket reads a packet from the link layer endpoint and verifies
 // that it is an IPv4 packet with the expected source and destination
 // addresses.
-func (c *Context) GetPacket() *bufferv2.View {
+func (c *Context) GetPacket() *buffer.View {
 	c.t.Helper()
 
 	p := c.GetPacketWithTimeout(5 * time.Second)
@@ -373,7 +383,7 @@ func (c *Context) GetPacket() *bufferv2.View {
 // and verifies that it is an IPv4 packet with the expected source
 // and destination address. If no packet is available it will return
 // nil immediately.
-func (c *Context) GetPacketNonBlocking() *bufferv2.View {
+func (c *Context) GetPacketNonBlocking() *buffer.View {
 	c.t.Helper()
 
 	pkt := c.linkEP.Read()
@@ -401,9 +411,9 @@ func (c *Context) GetPacketNonBlocking() *bufferv2.View {
 }
 
 // SendICMPPacket builds and sends an ICMPv4 packet via the link layer endpoint.
-func (c *Context) SendICMPPacket(typ header.ICMPv4Type, code header.ICMPv4Code, p1, p2 *bufferv2.View, maxTotalSize int) {
+func (c *Context) SendICMPPacket(typ header.ICMPv4Type, code header.ICMPv4Code, p1, p2 *buffer.View, maxTotalSize int) {
 	// Allocate a buffer data and headers.
-	buf := bufferv2.NewViewSize(header.IPv4MinimumSize + header.ICMPv4PayloadOffset + p2.Size())
+	buf := buffer.NewViewSize(header.IPv4MinimumSize + header.ICMPv4PayloadOffset + p2.Size())
 	if buf.Size() > maxTotalSize {
 		buf.CapLength(maxTotalSize)
 	}
@@ -430,20 +440,20 @@ func (c *Context) SendICMPPacket(typ header.ICMPv4Type, code header.ICMPv4Code, 
 
 	// Inject packet.
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: bufferv2.MakeWithView(buf),
+		Payload: buffer.MakeWithView(buf),
 	})
 	defer pkt.DecRef()
 	c.linkEP.InjectInbound(ipv4.ProtocolNumber, pkt)
 }
 
 // BuildSegment builds a TCP segment based on the given Headers and payload.
-func (c *Context) BuildSegment(payload []byte, h *Headers) bufferv2.Buffer {
+func (c *Context) BuildSegment(payload []byte, h *Headers) buffer.Buffer {
 	return c.BuildSegmentWithAddrs(payload, h, TestAddr, StackAddr)
 }
 
 // BuildSegmentWithAddrs builds a TCP segment based on the given Headers,
 // payload and source and destination IPv4 addresses.
-func (c *Context) BuildSegmentWithAddrs(payload []byte, h *Headers, src, dst tcpip.Address) bufferv2.Buffer {
+func (c *Context) BuildSegmentWithAddrs(payload []byte, h *Headers, src, dst tcpip.Address) buffer.Buffer {
 	// Allocate a buffer for data and headers.
 	buf := make([]byte, header.TCPMinimumSize+header.IPv4MinimumSize+len(h.TCPOpts)+len(payload))
 	copy(buf[len(buf)-len(payload):], payload)
@@ -480,12 +490,12 @@ func (c *Context) BuildSegmentWithAddrs(payload []byte, h *Headers, src, dst tcp
 	t.SetChecksum(^t.CalculateChecksum(xsum))
 
 	// Inject packet.
-	return bufferv2.MakeWithData(buf)
+	return buffer.MakeWithData(buf)
 }
 
 // SendSegment sends a TCP segment that has already been built and written to a
 // buffer.VectorisedView.
-func (c *Context) SendSegment(s bufferv2.Buffer) {
+func (c *Context) SendSegment(s buffer.Buffer) {
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 		Payload: s,
 	})
@@ -618,7 +628,7 @@ func (c *Context) CreateV6Endpoint(v6only bool) {
 
 // GetV6Packet reads a single packet from the link layer endpoint of the context
 // and asserts that it is an IPv6 Packet with the expected src/dest addresses.
-func (c *Context) GetV6Packet() *bufferv2.View {
+func (c *Context) GetV6Packet() *buffer.View {
 	c.t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -685,7 +695,7 @@ func (c *Context) SendV6PacketWithAddrs(payload []byte, h *Headers, src, dst tcp
 
 	// Inject packet.
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: bufferv2.MakeWithData(buf),
+		Payload: buffer.MakeWithData(buf),
 	})
 	defer pkt.DecRef()
 	c.linkEP.InjectInbound(ipv6.ProtocolNumber, pkt)
@@ -841,7 +851,7 @@ func (r *RawEndpoint) SendPacket(payload []byte, opts []byte) {
 
 // VerifyAndReturnACKWithTS verifies that the tsEcr field int he ACK matches
 // the provided tsVal as well as returns the original packet.
-func (r *RawEndpoint) VerifyAndReturnACKWithTS(tsVal uint32) *bufferv2.View {
+func (r *RawEndpoint) VerifyAndReturnACKWithTS(tsVal uint32) *buffer.View {
 	r.C.t.Helper()
 	// Read ACK and verify that tsEcr of ACK packet is [1,2,3,4]
 	ackPacket := r.C.GetPacket()
@@ -1000,7 +1010,7 @@ func (c *Context) CreateConnectedWithOptions(wantOptions header.TCPSynOptions, d
 	})
 
 	// Read ACK.
-	var ackPacket *bufferv2.View
+	var ackPacket *buffer.View
 	// Ignore retransimitted SYN packets.
 	for {
 		packet := c.GetPacket()

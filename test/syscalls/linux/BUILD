@@ -151,6 +151,8 @@ cc_library(
     hdrs = ["socket_netlink_route_util.h"],
     deps = [
         ":socket_netlink_util",
+        "//test/util:file_descriptor",
+        "//test/util:posix_error",
     ],
 )
 
@@ -489,6 +491,7 @@ cc_binary(
         "//test/util:logging",
         "//test/util:mount_util",
         "//test/util:multiprocess_util",
+        "//test/util:posix_error",
         "//test/util:temp_path",
         "//test/util:test_main",
         "//test/util:test_util",
@@ -1503,6 +1506,7 @@ cc_binary(
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/base:endian",
         gtest,
+        "//test/util:posix_error",
         "//test/util:test_main",
         "//test/util:test_util",
     ],
@@ -1523,6 +1527,7 @@ cc_binary(
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/base:endian",
         gtest,
+        "//test/util:posix_error",
         "//test/util:test_main",
         "//test/util:test_util",
     ],
@@ -1714,6 +1719,7 @@ cc_binary(
     name = "prctl_test",
     testonly = 1,
     srcs = ["prctl.cc"],
+    data = ["//test/cmd/test_app"],
     linkstatic = 1,
     deps = [
         "//test/util:capability_util",
@@ -1722,6 +1728,7 @@ cc_binary(
         gtest,
         "//test/util:multiprocess_util",
         "//test/util:posix_error",
+        "//test/util:signal_util",
         "//test/util:test_util",
         "//test/util:thread_util",
     ],
@@ -1825,6 +1832,8 @@ cc_binary(
         "//test/util:fs_util",
         "//test/util:mount_util",
         "@com_google_absl//absl/algorithm:container",
+        "@com_google_absl//absl/container:btree",
+        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/container:node_hash_set",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:str_format",
@@ -2320,6 +2329,21 @@ cc_binary(
 )
 
 cc_binary(
+    name = "setns_test",
+    testonly = 1,
+    srcs = ["setns.cc"],
+    linkstatic = 1,
+    deps = [
+        "//test/util:capability_util",
+        "//test/util:file_descriptor",
+        "//test/util:posix_error",
+        "//test/util:test_main",
+        "//test/util:test_util",
+        gtest,
+    ],
+)
+
+cc_binary(
     name = "splice_test",
     testonly = 1,
     srcs = ["splice.cc"],
@@ -2653,6 +2677,7 @@ cc_library(
     deps = [
         ":ip_socket_test_util",
         "//test/util:socket_util",
+        "//test/util:test_util",
         "@com_google_absl//absl/memory",
         gtest,
     ],
@@ -3335,6 +3360,7 @@ cc_binary(
         "//test/util:file_descriptor",
         "//test/util:socket_util",
         gtest,
+        "//test/util:posix_error",
         "//test/util:test_main",
         "//test/util:test_util",
     ],
@@ -3351,6 +3377,8 @@ cc_binary(
         "//test/util:capability_util",
         "//test/util:cleanup",
         "//test/util:file_descriptor",
+        "//test/util:posix_error",
+        "//test/util:save_util",
         "//test/util:socket_util",
         "@com_google_absl//absl/strings:str_format",
         gtest,
@@ -4051,6 +4079,7 @@ cc_binary(
     deps = [
         ":ip_socket_test_util",
         ":unix_domain_socket_test_util",
+        "//test/util:capability_util",
         "//test/util:socket_util",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/strings:str_format",
@@ -4061,6 +4090,23 @@ cc_binary(
         "//test/util:test_main",
         "//test/util:test_util",
         "//test/util:thread_util",
+    ],
+)
+
+cc_binary(
+    name = "udp_raw_socket_test",
+    testonly = 1,
+    srcs = ["udp_raw_socket.cc"],
+    defines = select_system(),
+    linkstatic = 1,
+    deps = [
+        gtest,
+        "//test/util:capability_util",
+        "//test/util:file_descriptor",
+        "//test/util:posix_error",
+        "//test/util:socket_util",
+        "//test/util:test_main",
+        "//test/util:test_util",
     ],
 )
 
@@ -4258,7 +4304,10 @@ cc_binary(
         gtest,
         ":ip_socket_test_util",
         "//test/util:capability_util",
+        "//test/util:file_descriptor",
+        "//test/util:temp_path",
         "//test/util:test_main",
+        "//test/util:test_util",
         "//test/util:thread_util",
     ],
 )

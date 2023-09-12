@@ -21,6 +21,7 @@ cc_pie_obj(
         ],
         arm64 = ["sighandler_arm64.c"],
     ) + [
+        "atomic.h",
         "sysmsg.h",
         "sysmsg_offsets.h",
     ],
@@ -30,6 +31,7 @@ cc_pie_obj(
 cc_pie_obj(
     name = "sysmsg_lib",
     srcs = [
+        "atomic.h",
         "sysmsg.h",
         "sysmsg_lib.c",
         "sysmsg_offsets.h",
@@ -127,12 +129,8 @@ go_library(
     visibility = ["//:sandbox"],
     deps = [
         "//pkg/abi/linux",
-        "//pkg/abi/linux/errno",
         "//pkg/cpuid",
-        "//pkg/errors",
         "//pkg/hostarch",
-        "//pkg/log",
-        "//pkg/sentry/platform/interrupt",
         "@org_golang_x_sys//unix:go_default_library",
     ],
 )

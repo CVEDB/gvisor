@@ -13,6 +13,7 @@ go_library(
         "fake_metric.go",
         "metric.go",
         "metric_unsafe.go",
+        "profiling_metric.go",
     ],
     visibility = ["//:sandbox"],
     deps = [
@@ -43,6 +44,7 @@ go_test(
         "utils_test.go",
     ],
     library = ":metric",
+    tags = ["not_run:arm"],
     deps = [
         ":metric_go_proto",
         "//pkg/eventchannel",

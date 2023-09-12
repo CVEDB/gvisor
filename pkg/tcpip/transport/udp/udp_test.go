@@ -24,7 +24,7 @@ import (
 	"os"
 	"testing"
 
-	"gvisor.dev/gvisor/pkg/bufferv2"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/checker"
@@ -725,20 +725,31 @@ func TestDualWriteConnectedToV4Mapped(t *testing.T) {
 }
 
 func TestPreflightBindsEndpoint(t *testing.T) {
-	protocols := map[string]tcpip.NetworkProtocolNumber{
-		"ipv4": ipv4.ProtocolNumber,
-		"ipv6": ipv6.ProtocolNumber,
+	tcs := []struct {
+		name  string
+		proto tcpip.NetworkProtocolNumber
+		flow  context.TestFlow
+	}{
+		{
+			name:  "ipv4",
+			proto: ipv4.ProtocolNumber,
+			flow:  context.UnicastV4,
+		},
+		{
+			name:  "ipv6",
+			proto: ipv6.ProtocolNumber,
+			flow:  context.UnicastV6,
+		},
 	}
-	for name, ipProtocolNumber := range protocols {
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range tcs {
+		t.Run(tc.name, func(t *testing.T) {
 			c := context.New(t, []stack.TransportProtocolFactory{udp.NewProtocol})
 			defer c.Cleanup()
 
-			c.CreateEndpoint(ipProtocolNumber, udp.ProtocolNumber)
+			c.CreateEndpoint(tc.proto, udp.ProtocolNumber)
 
-			flow := context.UnicastV6
-			h := flow.MakeHeader4Tuple(context.Outgoing)
-			writeDstAddr := flow.MapAddrIfApplicable(h.Dst.Addr)
+			h := tc.flow.MakeHeader4Tuple(context.Outgoing)
+			writeDstAddr := tc.flow.MapAddrIfApplicable(h.Dst.Addr)
 			writeOpts := tcpip.WriteOptions{
 				To: &tcpip.FullAddress{Addr: writeDstAddr, Port: h.Dst.Port},
 			}
@@ -1562,7 +1573,7 @@ func TestV4UnknownDestination(t *testing.T) {
 				t.Fatalf("got an ICMP packet of size: %d, want: sz <= %d", got, want)
 			}
 
-			hdr := bufferv2.NewViewWithData(pkt)
+			hdr := buffer.NewViewWithData(pkt)
 			defer hdr.Release()
 			checker.IPv4(t, hdr, checker.ICMPv4(
 				checker.ICMPv4Type(header.ICMPv4DstUnreachable),
@@ -1659,7 +1670,7 @@ func TestV6UnknownDestination(t *testing.T) {
 				t.Fatalf("got an ICMP packet of size: %d, want: sz <= %d", got, want)
 			}
 
-			hdr := bufferv2.NewViewWithData(pkt)
+			hdr := buffer.NewViewWithData(pkt)
 			defer hdr.Release()
 			checker.IPv6(t, hdr, checker.ICMPv6(
 				checker.ICMPv6Type(header.ICMPv6DstUnreachable),
@@ -1965,32 +1976,32 @@ func TestOutgoingSubnetBroadcast(t *testing.T) {
 	const nicID1 = 1
 
 	ipv4Addr := tcpip.AddressWithPrefix{
-		Address:   "\xc0\xa8\x01\x3a",
+		Address:   tcpip.AddrFromSlice([]byte("\xc0\xa8\x01\x3a")),
 		PrefixLen: 24,
 	}
 	ipv4Subnet := ipv4Addr.Subnet()
 	ipv4SubnetBcast := ipv4Subnet.Broadcast()
 	ipv4Gateway := testutil.MustParse4("192.168.1.1")
 	ipv4AddrPrefix31 := tcpip.AddressWithPrefix{
-		Address:   "\xc0\xa8\x01\x3a",
+		Address:   tcpip.AddrFromSlice([]byte("\xc0\xa8\x01\x3a")),
 		PrefixLen: 31,
 	}
 	ipv4Subnet31 := ipv4AddrPrefix31.Subnet()
 	ipv4Subnet31Bcast := ipv4Subnet31.Broadcast()
 	ipv4AddrPrefix32 := tcpip.AddressWithPrefix{
-		Address:   "\xc0\xa8\x01\x3a",
+		Address:   tcpip.AddrFromSlice([]byte("\xc0\xa8\x01\x3a")),
 		PrefixLen: 32,
 	}
 	ipv4Subnet32 := ipv4AddrPrefix32.Subnet()
 	ipv4Subnet32Bcast := ipv4Subnet32.Broadcast()
 	ipv6Addr := tcpip.AddressWithPrefix{
-		Address:   "\x20\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01",
+		Address:   tcpip.AddrFromSlice([]byte("\x20\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01")),
 		PrefixLen: 64,
 	}
 	ipv6Subnet := ipv6Addr.Subnet()
 	ipv6SubnetBcast := ipv6Subnet.Broadcast()
 	remNetAddr := tcpip.AddressWithPrefix{
-		Address:   "\x64\x0a\x7b\x18",
+		Address:   tcpip.AddrFromSlice([]byte("\x64\x0a\x7b\x18")),
 		PrefixLen: 24,
 	}
 	remNetSubnet := remNetAddr.Subnet()
@@ -2104,7 +2115,7 @@ func TestOutgoingSubnetBroadcast(t *testing.T) {
 			s.SetRouteTable(test.routes)
 
 			var netProto tcpip.NetworkProtocolNumber
-			switch l := len(test.remoteAddr); l {
+			switch l := test.remoteAddr.Len(); l {
 			case header.IPv4AddressSize:
 				netProto = header.IPv4ProtocolNumber
 			case header.IPv6AddressSize:

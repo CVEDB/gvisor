@@ -45,6 +45,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/control"
 	"gvisor.dev/gvisor/pkg/sentry/platform"
 	"gvisor.dev/gvisor/pkg/sentry/seccheck"
+	"gvisor.dev/gvisor/pkg/state/statefile"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/urpc"
 	"gvisor.dev/gvisor/runsc/boot"
@@ -178,20 +179,24 @@ type Sandbox struct {
 	// ControlAddress is the uRPC address used to connect to the sandbox.
 	ControlAddress string `json:"control_address"`
 
+	// MountHints provides extra information about container mounts that apply
+	// to the entire pod.
+	MountHints *boot.PodMountHints `json:"mountHints"`
+
 	// child is set if a sandbox process is a child of the current process.
 	//
 	// This field isn't saved to json, because only a creator of sandbox
 	// will have it as a child process.
-	child bool
+	child bool `nojson:"true"`
 
 	// statusMu protects status.
-	statusMu sync.Mutex
+	statusMu sync.Mutex `nojson:"true"`
 
 	// status is the exit status of a sandbox process. It's only set if the
 	// child==true and the sandbox was waited on. This field allows for multiple
 	// threads to wait on sandbox and get the exit code, since Linux will return
 	// WaitStatus to one of the waiters only.
-	status unix.WaitStatus
+	status unix.WaitStatus `nojson:"true"`
 }
 
 // Getpid returns the process ID of the sandbox process.
@@ -225,6 +230,15 @@ type Args struct {
 	// OverlayFilestoreFiles are the regular files that will back the tmpfs upper
 	// mount in the overlay mounts.
 	OverlayFilestoreFiles []*os.File
+
+	// OverlayMediums contains information about how the gofer mounts have been
+	// overlaid. The first entry is for rootfs and the following entries are for
+	// bind mounts in Spec.Mounts (in the same order).
+	OverlayMediums boot.OverlayMediumFlags
+
+	// MountHints provides extra information about containers mounts that apply
+	// to the entire pod.
+	MountHints *boot.PodMountHints
 
 	// MountsFile is a file container mount information from the spec. It's
 	// equivalent to the mounts from the spec, except that all paths have been
@@ -262,6 +276,7 @@ func New(conf *config.Config, args *Args) (*Sandbox, error) {
 		GID:                 -1, // prevent usage before it's set.
 		MetricMetadata:      conf.MetricMetadata(),
 		MetricServerAddress: conf.MetricServer,
+		MountHints:          args.MountHints,
 	}
 	if args.Spec != nil && args.Spec.Annotations != nil {
 		s.PodName = args.Spec.Annotations[podNameAnnotation]
@@ -360,7 +375,7 @@ func (s *Sandbox) CreateSubcontainer(conf *config.Config, cid string, tty *os.Fi
 }
 
 // StartRoot starts running the root container process inside the sandbox.
-func (s *Sandbox) StartRoot(spec *specs.Spec, conf *config.Config) error {
+func (s *Sandbox) StartRoot(conf *config.Config) error {
 	pid := s.Pid.load()
 	log.Debugf("Start root sandbox %q, PID: %d", s.ID, pid)
 	conn, err := s.sandboxConnect()
@@ -383,12 +398,13 @@ func (s *Sandbox) StartRoot(spec *specs.Spec, conf *config.Config) error {
 }
 
 // StartSubcontainer starts running a sub-container inside the sandbox.
-func (s *Sandbox) StartSubcontainer(spec *specs.Spec, conf *config.Config, cid string, stdios, goferFiles, overlayFilestoreFiles []*os.File) error {
+func (s *Sandbox) StartSubcontainer(spec *specs.Spec, conf *config.Config, cid string, stdios, goferFiles, overlayFilestoreFiles []*os.File, overlayMediums []boot.OverlayMedium) error {
 	log.Debugf("Start sub-container %q in sandbox %q, PID: %d", cid, s.ID, s.Pid.load())
 
 	if err := s.configureStdios(conf, stdios); err != nil {
 		return err
 	}
+	s.fixPidns(spec)
 
 	// The payload contains (in this specific order):
 	// * stdin/stdout/stderr (optional: only present when not using TTY)
@@ -406,6 +422,7 @@ func (s *Sandbox) StartSubcontainer(spec *specs.Spec, conf *config.Config, cid s
 		Conf:                   conf,
 		CID:                    cid,
 		NumOverlayFilestoreFDs: len(overlayFilestoreFiles),
+		OverlayMediums:         overlayMediums,
 		FilePayload:            payload,
 	}
 	if err := s.call(boot.ContMgrStartSubcontainer, &args, nil); err != nil {
@@ -415,7 +432,7 @@ func (s *Sandbox) StartSubcontainer(spec *specs.Spec, conf *config.Config, cid s
 }
 
 // Restore sends the restore call for a container in the sandbox.
-func (s *Sandbox) Restore(cid string, spec *specs.Spec, conf *config.Config, filename string) error {
+func (s *Sandbox) Restore(conf *config.Config, cid string, filename string) error {
 	log.Debugf("Restore sandbox %q", s.ID)
 
 	rf, err := os.Open(filename)
@@ -561,12 +578,9 @@ func (s *Sandbox) Execute(conf *config.Config, args *control.ExecArgs) (int32, e
 func (s *Sandbox) Event(cid string) (*boot.EventOut, error) {
 	log.Debugf("Getting events for container %q in sandbox %q", cid, s.ID)
 	var e boot.EventOut
-	// TODO(b/129292330): Pass in the container id (cid) here. The sandbox
-	// should return events only for that container.
-	if err := s.call(boot.ContMgrEvent, nil, &e); err != nil {
+	if err := s.call(boot.ContMgrEvent, &cid, &e); err != nil {
 		return nil, fmt.Errorf("retrieving event data from sandbox: %w", err)
 	}
-	e.Event.ID = cid
 	return &e, nil
 }
 
@@ -670,6 +684,9 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 			return err
 		}
 	}
+	if err := donations.DonateDebugLogFile("profiling-metrics-fd", conf.ProfilingMetricsLog, "metrics", test); err != nil {
+		return err
+	}
 
 	// Relay all the config flags to the sandbox process.
 	cmd := exec.Command(specutils.ExePath, conf.ToFlags()...)
@@ -691,6 +708,12 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 	//
 	// All flags after this must be for the boot command
 	cmd.Args = append(cmd.Args, "boot", "--bundle="+args.BundleDir)
+
+	// Clear environment variables, unless --TESTONLY-unsafe-nonroot is set.
+	if !conf.TestOnlyAllowRunAsCurrentUserWithoutChroot {
+		// Setting cmd.Env = nil causes cmd to inherit the current process's env.
+		cmd.Env = []string{}
+	}
 
 	// If there is a gofer, sends all socket ends to the sandbox.
 	donations.DonateAndClose("io-fds", args.IOFiles...)
@@ -716,6 +739,9 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 	if err := donations.OpenAndDonate("trace-fd", conf.TraceFile, profFlags); err != nil {
 		return err
 	}
+
+	// Pass overlay mediums.
+	cmd.Args = append(cmd.Args, "--overlay-mediums="+args.OverlayMediums.String())
 
 	// Create a socket for the control server and donate it to the sandbox.
 	controlAddress, sockFD, err := createControlSocket(conf.RootDir, s.ID)
@@ -797,14 +823,28 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 	// filesystem is required. These features require to run inside the user
 	// namespace specified in the spec or the current namespace if none is
 	// configured.
+	rootlessEUID := unix.Geteuid() != 0
+	setUserMappings := false
 	if conf.Network == config.NetworkHost || conf.DirectFS {
 		if userns, ok := specutils.GetNS(specs.UserNamespace, args.Spec); ok {
 			log.Infof("Sandbox will be started in container's user namespace: %+v", userns)
 			nss = append(nss, userns)
-			specutils.SetUIDGIDMappings(cmd, args.Spec)
-			// We need to set UID and GID to have capabilities in a new user namespace.
-			cmd.SysProcAttr.Credential = &syscall.Credential{Uid: 0, Gid: 0}
+			if rootlessEUID {
+				syncFile, err := ConfigureCmdForRootless(cmd, &donations)
+				if err != nil {
+					return err
+				}
+				defer syncFile.Close()
+				setUserMappings = true
+			} else {
+				specutils.SetUIDGIDMappings(cmd, args.Spec)
+				// We need to set UID and GID to have capabilities in a new user namespace.
+				cmd.SysProcAttr.Credential = &syscall.Credential{Uid: 0, Gid: 0}
+			}
 		} else {
+			if rootlessEUID {
+				return fmt.Errorf("unable to run a rootless container without userns")
+			}
 			log.Infof("Sandbox will be started in the current user namespace")
 		}
 		// When running in the caller's defined user namespace, apply the same
@@ -816,14 +856,13 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 		// bind-mount the executable inside it.
 		if conf.TestOnlyAllowRunAsCurrentUserWithoutChroot {
 			log.Warningf("Running sandbox in test mode without chroot. This is only safe in tests!")
-		} else if specutils.HasCapabilities(capability.CAP_SYS_ADMIN) {
+		} else if specutils.HasCapabilities(capability.CAP_SYS_ADMIN) || rootlessEUID {
 			log.Infof("Sandbox will be started in minimal chroot")
 			cmd.Args = append(cmd.Args, "--setup-root")
 		} else {
 			return fmt.Errorf("can't run sandbox process in minimal chroot since we don't have CAP_SYS_ADMIN")
 		}
 	} else {
-		rootlessEUID := unix.Getuid() != 0
 		// If we have CAP_SETUID and CAP_SETGID, then we can also run
 		// as user nobody.
 		if conf.TestOnlyAllowRunAsCurrentUserWithoutChroot {
@@ -862,7 +901,12 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 
 			// A sandbox process will construct an empty root for itself, so it has
 			// to have CAP_SYS_ADMIN and CAP_SYS_CHROOT capabilities.
-			cmd.SysProcAttr.AmbientCaps = append(cmd.SysProcAttr.AmbientCaps, uintptr(capability.CAP_SYS_ADMIN), uintptr(capability.CAP_SYS_CHROOT))
+			cmd.SysProcAttr.AmbientCaps = append(cmd.SysProcAttr.AmbientCaps,
+				uintptr(capability.CAP_SYS_ADMIN),
+				uintptr(capability.CAP_SYS_CHROOT),
+				// CAP_SETPCAP is required to clear the bounding set.
+				uintptr(capability.CAP_SETPCAP),
+			)
 
 		} else {
 			return fmt.Errorf("can't run sandbox process as user nobody since we don't have CAP_SETUID or CAP_SETGID")
@@ -935,11 +979,13 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 	// because it relies on stdin being the next FD donated.
 	donations.Donate("stdio-fds", stdios[:]...)
 
-	mem, err := totalSystemMemory()
+	totalSysMem, err := totalSystemMemory()
 	if err != nil {
 		return err
 	}
+	cmd.Args = append(cmd.Args, "--total-host-memory", strconv.FormatUint(totalSysMem, 10))
 
+	mem := totalSysMem
 	if s.CgroupJSON.Cgroup != nil {
 		cpuNum, err := s.CgroupJSON.Cgroup.NumCPU()
 		if err != nil {
@@ -1016,6 +1062,11 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 	s.OriginalOOMScoreAdj, err = specutils.GetOOMScoreAdj(cmd.Process.Pid)
 	if err != nil {
 		return err
+	}
+	if setUserMappings {
+		if err := SetUserMappings(args.Spec, cmd.Process.Pid); err != nil {
+			return err
+		}
 	}
 
 	s.child = true
@@ -1170,9 +1221,10 @@ func (s *Sandbox) SignalProcess(cid string, pid int32, sig unix.Signal, fgProces
 
 // Checkpoint sends the checkpoint call for a container in the sandbox.
 // The statefile will be written to f.
-func (s *Sandbox) Checkpoint(cid string, f *os.File) error {
-	log.Debugf("Checkpoint sandbox %q", s.ID)
+func (s *Sandbox) Checkpoint(cid string, f *os.File, options statefile.Options) error {
+	log.Debugf("Checkpoint sandbox %q, options %+v", s.ID, options)
 	opt := control.SaveOpts{
+		Metadata: options.WriteToMetadata(map[string]string{}),
 		FilePayload: urpc.FilePayload{
 			Files: []*os.File{f},
 		},
@@ -1499,4 +1551,100 @@ func (s *Sandbox) CgroupsWriteControlFile(file control.CgroupControlFile, value 
 		return fmt.Errorf("expected 1 result, got %d, raw: %+v", len(out.Results), out)
 	}
 	return out.Results[0].AsError()
+}
+
+// fixPidns looks at the PID namespace path. If that path corresponds to the
+// sandbox process PID namespace, then change the spec so that the container
+// joins the sandbox root namespace.
+func (s *Sandbox) fixPidns(spec *specs.Spec) {
+	pidns, ok := specutils.GetNS(specs.PIDNamespace, spec)
+	if !ok {
+		// pidns was not set, nothing to fix.
+		return
+	}
+	if pidns.Path != fmt.Sprintf("/proc/%d/ns/pid", s.Pid.load()) {
+		// Fix only if the PID namespace corresponds to the sandbox's.
+		return
+	}
+
+	for i := range spec.Linux.Namespaces {
+		if spec.Linux.Namespaces[i].Type == specs.PIDNamespace {
+			// Removing the namespace makes the container join the sandbox root
+			// namespace.
+			log.Infof("Fixing PID namespace in spec from %q to make the container join the sandbox root namespace", pidns.Path)
+			spec.Linux.Namespaces = append(spec.Linux.Namespaces[:i], spec.Linux.Namespaces[i+1:]...)
+			return
+		}
+	}
+	panic("unreachable")
+}
+
+// ConfigureCmdForRootless configures cmd to donate a socket FD that can be
+// used to synchronize userns configuration.
+func ConfigureCmdForRootless(cmd *exec.Cmd, donations *donation.Agency) (*os.File, error) {
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fds[1]), "userns sync other FD")
+	donations.DonateAndClose("sync-userns-fd", f)
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &unix.SysProcAttr{}
+	}
+	cmd.SysProcAttr.AmbientCaps = []uintptr{
+		// Same as `cap` in cmd/gofer.go.
+		unix.CAP_CHOWN,
+		unix.CAP_DAC_OVERRIDE,
+		unix.CAP_DAC_READ_SEARCH,
+		unix.CAP_FOWNER,
+		unix.CAP_FSETID,
+		unix.CAP_SYS_CHROOT,
+		// Needed for setuid(2)/setgid(2).
+		unix.CAP_SETUID,
+		unix.CAP_SETGID,
+		// Needed for chroot.
+		unix.CAP_SYS_ADMIN,
+		// Needed to be able to clear bounding set (PR_CAPBSET_DROP).
+		unix.CAP_SETPCAP,
+	}
+	return os.NewFile(uintptr(fds[0]), "userns sync FD"), nil
+}
+
+// SetUserMappings uses newuidmap/newgidmap programs to set up user ID mappings
+// for process pid.
+func SetUserMappings(spec *specs.Spec, pid int) error {
+	log.Debugf("Setting user mappings")
+	args := []string{strconv.Itoa(pid)}
+	for _, idMap := range spec.Linux.UIDMappings {
+		log.Infof("Mapping host uid %d to container uid %d (size=%d)",
+			idMap.HostID, idMap.ContainerID, idMap.Size)
+		args = append(args,
+			strconv.Itoa(int(idMap.ContainerID)),
+			strconv.Itoa(int(idMap.HostID)),
+			strconv.Itoa(int(idMap.Size)),
+		)
+	}
+
+	out, err := exec.Command("newuidmap", args...).CombinedOutput()
+	log.Debugf("newuidmap: %#v\n%s", args, out)
+	if err != nil {
+		return fmt.Errorf("newuidmap failed: %w", err)
+	}
+
+	args = []string{strconv.Itoa(pid)}
+	for _, idMap := range spec.Linux.GIDMappings {
+		log.Infof("Mapping host uid %d to container uid %d (size=%d)",
+			idMap.HostID, idMap.ContainerID, idMap.Size)
+		args = append(args,
+			strconv.Itoa(int(idMap.ContainerID)),
+			strconv.Itoa(int(idMap.HostID)),
+			strconv.Itoa(int(idMap.Size)),
+		)
+	}
+	out, err = exec.Command("newgidmap", args...).CombinedOutput()
+	log.Debugf("newgidmap: %#v\n%s", args, out)
+	if err != nil {
+		return fmt.Errorf("newgidmap failed: %w", err)
+	}
+	return nil
 }

@@ -13,9 +13,6 @@ go_library(
         "network_unsafe.go",
         "sandbox.go",
     ],
-    embedsrcs = [
-        "//runsc/sandbox/bpf:af_xdp_ebpf.o",  # keep
-    ],
     visibility = [
         "//runsc:__subpackages__",
         "//test:__subpackages__",
@@ -32,6 +29,7 @@ go_library(
         "//pkg/sentry/control",
         "//pkg/sentry/platform",
         "//pkg/sentry/seccheck",
+        "//pkg/state/statefile",
         "//pkg/sync",
         "//pkg/tcpip/header",
         "//pkg/tcpip/stack",
@@ -42,6 +40,7 @@ go_library(
         "//runsc/config",
         "//runsc/console",
         "//runsc/donation",
+        "//runsc/sandbox/bpf",
         "//runsc/specutils",
         "@com_github_cenkalti_backoff//:go_default_library",
         "@com_github_cilium_ebpf//:go_default_library",

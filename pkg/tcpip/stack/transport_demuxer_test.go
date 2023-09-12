@@ -21,7 +21,7 @@ import (
 	"strconv"
 	"testing"
 
-	"gvisor.dev/gvisor/pkg/bufferv2"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -35,14 +35,16 @@ import (
 )
 
 const (
-	testSrcAddrV6 = "\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"
-	testDstAddrV6 = tcpip.Address("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02")
-
-	testSrcAddrV4 = "\x0a\x00\x00\x01"
-	testDstAddrV4 = "\x0a\x00\x00\x02"
-
 	testDstPort = 1234
 	testSrcPort = 4096
+)
+
+var (
+	testDstAddrV6 = tcpip.AddrFromSlice([]byte("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02"))
+	testSrcAddrV6 = tcpip.AddrFromSlice([]byte("\x0a\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"))
+
+	testSrcAddrV4 = tcpip.AddrFromSlice([]byte("\x0a\x00\x00\x01"))
+	testDstAddrV4 = tcpip.AddrFromSlice([]byte("\x0a\x00\x00\x02"))
 )
 
 type testContext struct {
@@ -67,7 +69,7 @@ func newDualTestContextMultiNIC(t *testing.T, mtu uint32, linkEpIDs []tcpip.NICI
 
 		protocolAddrV4 := tcpip.ProtocolAddress{
 			Protocol:          ipv4.ProtocolNumber,
-			AddressWithPrefix: tcpip.Address(testDstAddrV4).WithPrefix(),
+			AddressWithPrefix: testDstAddrV4.WithPrefix(),
 		}
 		if err := s.AddProtocolAddress(linkEpID, protocolAddrV4, stack.AddressProperties{}); err != nil {
 			t.Fatalf("AddProtocolAddress(%d, %+v, {}): %s", linkEpID, protocolAddrV4, err)
@@ -140,7 +142,7 @@ func (c *testContext) sendV4Packet(payload []byte, h *headers, linkEpID tcpip.NI
 
 	// Inject packet.
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: bufferv2.MakeWithData(buf),
+		Payload: buffer.MakeWithData(buf),
 	})
 	c.linkEps[linkEpID].InjectInbound(ipv4.ProtocolNumber, pkt)
 }
@@ -177,7 +179,7 @@ func (c *testContext) sendV6Packet(payload []byte, h *headers, linkEpID tcpip.NI
 
 	// Inject packet.
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: bufferv2.MakeWithData(buf),
+		Payload: buffer.MakeWithData(buf),
 	})
 	c.linkEps[linkEpID].InjectInbound(ipv6.ProtocolNumber, pkt)
 }

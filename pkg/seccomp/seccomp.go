@@ -34,6 +34,13 @@ const (
 	defaultLabel = "default_action"
 )
 
+// NonNegativeFDCheck ensures an FD argument is a non-negative int.
+func NonNegativeFDCheck() LessThanOrEqual {
+	// Negative int32 has the MSB (31st bit) set. So the raw uint FD value must
+	// be less than or equal to 0x7fffffff.
+	return LessThanOrEqual(0x7fffffff)
+}
+
 // Install generates BPF code based on the set of syscalls provided. It only
 // allows syscalls that conform to the specification. Syscalls that violate the
 // specification will trigger RET_KILL_PROCESS. If RET_KILL_PROCESS is not
@@ -54,7 +61,9 @@ func Install(rules SyscallRules, denyRules SyscallRules) error {
 		return err
 	}
 
-	// Uncomment to get stack trace when there is a violation.
+	// ***   DEBUG TIP   ***
+	// If you suspect the process is getting killed due to a seccomp violation, uncomment the line
+	// below to get a panic stack trace when there is a violation.
 	// defaultAction = linux.BPFAction(linux.SECCOMP_RET_TRAP)
 
 	log.Infof("Installing seccomp filters for %d syscalls (action=%v)", len(rules), defaultAction)

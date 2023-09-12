@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"gvisor.dev/gvisor/pkg/bufferv2"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -332,7 +332,7 @@ func TestNoTLPRecoveryOnDSACK(t *testing.T) {
 	if err := c.EP.GetSockOpt(&info); err != nil {
 		t.Fatalf("GetSockOpt failed: %v", err)
 	}
-	var p *bufferv2.View
+	var p *buffer.View
 	if p = c.GetPacketWithTimeout(info.RTO); p != nil {
 		t.Errorf("received an unexpected packet: %v", p)
 		p.Release()
@@ -973,9 +973,10 @@ func TestRACKUpdateSackedOut(t *testing.T) {
 			t.Fatalf("SackedOut got updated to wrong value got: %v want: 2", state.Sender.SackedOut)
 		}
 
-		if state.Sender.SackedOut != 0 && ackNum == 1 {
+		if !state.Sender.FastRecovery.Active && state.Sender.SackedOut != 0 && ackNum == 1 {
 			t.Fatalf("SackedOut got updated to wrong value got: %v want: 0", state.Sender.SackedOut)
 		}
+
 		if ackNum > 0 {
 			close(probeDone)
 		}

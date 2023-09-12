@@ -20,13 +20,13 @@
 iperf_port=45201 # Not likely to be privileged.
 proxy_port=44000 # Ditto.
 mask=8
-
 client_addr=10.0.0.1
 client_proxy_addr=10.0.0.2
 server_proxy_addr=10.0.0.3
 server_addr=10.0.0.4
 full_server_addr=${server_addr}:${iperf_port}
 full_server_proxy_addr=${server_proxy_addr}:${proxy_port}
+iperf_binary_name=iperf3
 iperf_version_arg=
 
 # Defaults; this provides a reasonable approximation of a decent internet link.
@@ -49,12 +49,22 @@ disable_linux_gso=
 disable_linux_gro=
 gro=0
 num_client_threads=1
+sniff=false
+xdp=false
+declare -a unshare_opts=( -U -r )
 
 # Check for netem support.
 lsmod_output=$(lsmod | grep sch_netem)
 if [[ "$?" != "0" ]]; then
   echo "warning: sch_netem may not be installed." >&2
 fi
+
+function checktmp() {
+  if [[ "$1" =~ ^/tmp/ ]]; then
+    echo "Don't use /tmp for output files ('$1') -- tcp_benchmark mounts over /tmp and your file will never make it to the root /tmp."
+    exit 1
+  fi
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -134,22 +144,27 @@ while [[ $# -gt 0 ]]; do
     --cpuprofile)
       shift
       netstack_opts="${netstack_opts} -cpuprofile=$1"
+      checktmp "$1"
       ;;
     --memprofile)
       shift
       netstack_opts="${netstack_opts} -memprofile=$1"
+      checktmp "$1"
       ;;
     --blockprofile)
       shift
       netstack_opts="${netstack_opts} -blockprofile=$1"
+      checktmp "$1"
       ;;
     --mutexprofile)
       shift
       netstack_opts="${netstack_opts} -mutexprofile=$1"
+      checktmp "$1"
       ;;
     --traceprofile)
       shift
       netstack_opts="${netstack_opts} -traceprofile=$1"
+      checktmp "$1"
       ;;
     --disable-linux-gso)
       disable_linux_gso=1
@@ -181,6 +196,20 @@ while [[ $# -gt 0 ]]; do
       [[ "$#" -le 0 ]] && echo "no helper dir provided" && exit 1
       helper_dir=$1
       ;;
+    --iperf-binary)
+      shift
+      [[ "$#" -le 0 ]] && echo "no iperf name provided" && exit 1
+      iperf_binary_name=$1
+      ;;
+    --sniff)
+      netstack_opts="${netstack_opts} -sniff"
+      ;;
+    --xdp)
+      xdp=true
+      ;;
+    --no-user-ns)
+      unshare_opts=()
+      ;;
     *)
       echo "unknown option: $1"
       echo ""
@@ -207,6 +236,10 @@ while [[ $# -gt 0 ]]; do
       echo " --disable-linux-gro   disable GRO in the Linux network stack"
       echo " --gro                 set gVisor GRO timeout"
       echo " --ipv6                use ipv6 for benchmarks"
+      echo " --iperf-binary        name of the iperf binary to call"
+      echo " --sniff               sniff and output packet logs"
+      echo " --xdp                 use AF_XDP socket instead of AF_PACKET"
+      echo " --no-user-ns          don't run in a new user namespace. Useful for testing as root"
       echo ""
       echo "The output will of the script will be:"
       echo "  <throughput> <client-cpu-usage> <server-cpu-usage>"
@@ -255,7 +288,8 @@ if ${client}; then
   # and forward traffic using netstack.
   client_args="${proxy_binary} ${netstack_opts} -port ${proxy_port} -client \\
       -mtu ${mtu} -iface client.0 -addr ${client_proxy_addr} -mask ${mask} \\
-      -forward ${full_server_proxy_addr} -gso=${gso} -swgso=${swgso} --gro=${gro}"
+      -forward ${full_server_proxy_addr} -gso=${gso} -swgso=${swgso} --gro=${gro} \\
+      --xdp=${xdp}"
 fi
 
 # Server proxy that will listen on the proxy port and forward to the server's
@@ -266,7 +300,8 @@ if ${server}; then
   # iperf server using netstack.
   server_args="${proxy_binary} ${netstack_opts} -port ${proxy_port} -server \\
       -mtu ${mtu} -iface server.0 -addr ${server_proxy_addr} -mask ${mask} \\
-      -forward ${full_server_addr} -gso=${gso} -swgso=${swgso} --gro=${gro}"
+      -forward ${full_server_addr} -gso=${gso} -swgso=${swgso} --gro=${gro} \\
+      --xdp=${xdp}"
 fi
 
 # Specify loss and duplicate parameters only if they are non-zero
@@ -279,7 +314,7 @@ if [[ "$(echo "$half_duplicate" | bc -q)" != "0" ]]; then
   duplicate_opt="duplicate ${half_duplicate}%"
 fi
 
-exec unshare -U -m -n -r -f -p --mount-proc /bin/bash << EOF
+exec unshare "${unshare_opts[@]}" -m -n -f -p --mount-proc /bin/bash << EOF
 set -e -m
 
 if [[ ${verbose} == "true" ]]; then
@@ -382,7 +417,7 @@ ${nsjoin_binary} /tmp/server.netns ${server_args} &
 server_pid=\$!
 
 # Start the iperf server.
-${nsjoin_binary} /tmp/server.netns iperf ${iperf_version_arg} -p ${iperf_port} -s >&2 &
+${nsjoin_binary} /tmp/server.netns ${iperf_binary_name} ${iperf_version_arg} -p ${iperf_port} -s >&2 &
 iperf_pid=\$!
 
 # Give services time to start.
@@ -411,10 +446,10 @@ set +e
 trap cleanup EXIT
 
 # Run the benchmark, recording the results file.
-while ${nsjoin_binary} /tmp/client.netns iperf \\
+while ${nsjoin_binary} /tmp/client.netns ${iperf_binary_name} \\
     ${iperf_version_arg} -p ${proxy_port} -c ${client_addr} -t ${duration} -f m -P ${num_client_threads} 2>&1 \\
     | tee \$results_file \\
-    | grep "connect failed" >/dev/null; do
+    | grep -E "connect failed|unable to connect" >/dev/null; do
   sleep 0.1 # Wait for all services.
 done
 
@@ -431,7 +466,7 @@ cat \$results_file >&2
 
 # Emit a useful result (final throughput).
 mbits=\$(grep Mbits/sec \$results_file \\
-  | sed -n -e 's/^.*[[:space:]]\\([[:digit:]]\\+\\(\\.[[:digit:]]\\+\\)\\?\\)[[:space:]]*Mbits\\/sec.*/\\1/p')
+  | grep 'sender' | awk '{print \$7};')
 client_cpu_ticks=\$(cat /proc/\$client_pid/stat \\
   | awk '{print (\$14+\$15);}')
 server_cpu_ticks=\$(cat /proc/\$server_pid/stat \\
@@ -439,5 +474,20 @@ server_cpu_ticks=\$(cat /proc/\$server_pid/stat \\
 ticks_per_sec=\$(getconf CLK_TCK)
 client_cpu_load=\$(bc -l <<< \$client_cpu_ticks/\$ticks_per_sec/${duration})
 server_cpu_load=\$(bc -l <<< \$server_cpu_ticks/\$ticks_per_sec/${duration})
-echo \$mbits \$client_cpu_load \$server_cpu_load
+
+hostgso=true
+if [[ "${disable_linux_gso}" ]]; then
+  hostgso=false
+fi
+hostgro=true
+if [[ "${disable_linux_gro}" ]]; then
+  hostgro=false
+fi
+
+if ${client}; then
+  echo "BenchmarkTCP/role=client/host-gso=\$hostgso/host-gro=\$hostgro 1 \$mbits Mb/s \$client_cpu_load cpu-time"
+elif ${server}; then
+  echo "BenchmarkTCP/role=server/host-gso=\$hostgso/host-gro=\$hostgro 1 \$mbits Mb/s \$server_cpu_load cpu-time"
+fi
+
 EOF

@@ -29,6 +29,7 @@ import (
 	"gvisor.dev/gvisor/pkg/cpuid"
 	"gvisor.dev/gvisor/pkg/fspath"
 	"gvisor.dev/gvisor/pkg/log"
+	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/seccheck"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/sync"
@@ -77,7 +78,7 @@ func testSpec() *specs.Spec {
 // startGofer starts a new gofer routine serving 'root' path. It returns the
 // sandbox side of the connection, and a function that when called will stop the
 // gofer.
-func startGofer(root string) (int, func(), error) {
+func startGofer(root string, conf *config.Config) (int, func(), error) {
 	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return 0, nil, err
@@ -90,7 +91,11 @@ func startGofer(root string) (int, func(), error) {
 		unix.Close(goferEnd)
 		return 0, nil, fmt.Errorf("error creating server on FD %d: %v", goferEnd, err)
 	}
-	server := fsgofer.NewLisafsServer(fsgofer.Config{})
+	server := fsgofer.NewLisafsServer(fsgofer.Config{
+		HostUDS:            conf.GetHostUDS(),
+		HostFifo:           conf.HostFifo,
+		DonateMountPointFD: conf.DirectFS,
+	})
 	c, err := server.CreateConnection(socket, root, true /* readonly */)
 	if err != nil {
 		return 0, nil, err
@@ -113,7 +118,7 @@ func createLoader(conf *config.Config, spec *specs.Spec) (*Loader, func(), error
 	if err != nil {
 		return nil, nil, err
 	}
-	sandEnd, cleanup, err := startGofer(spec.Root.Path)
+	sandEnd, cleanup, err := startGofer(spec.Root.Path, conf)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -135,6 +140,7 @@ func createLoader(conf *config.Config, spec *specs.Spec) (*Loader, func(), error
 		ControllerFD:    fd,
 		GoferFDs:        []int{sandEnd},
 		StdioFDs:        stdio,
+		OverlayMediums:  []OverlayMedium{NoOverlay},
 		PodInitConfigFD: -1,
 		ExecFD:          -1,
 	}
@@ -469,19 +475,19 @@ func TestCreateMountNamespace(t *testing.T) {
 			defer l.Destroy()
 			defer loaderCleanup()
 
-			mntr := newContainerMounter(&l.root, l.k, l.mountHints, "", l.sandboxID)
-			if err := mntr.processHints(l.root.conf, l.root.procArgs.Credentials); err != nil {
+			if err := l.processHints(l.root.conf, l.root.procArgs.Credentials); err != nil {
 				t.Fatalf("failed process hints: %v", err)
 			}
+			mntr := newContainerMounter(&l.root, l.k, l.mountHints, l.sharedMounts, "", l.sandboxID)
 
 			ctx := l.k.SupervisorContext()
-			mns, err := mntr.mountAll(l.root.conf, &l.root.procArgs)
+			creds := auth.NewRootCredentials(l.root.procArgs.Credentials.UserNamespace)
+			mns, err := mntr.mountAll(ctx, creds, l.root.conf, &l.root.procArgs)
 			if err != nil {
 				t.Fatalf("mountAll: %v", err)
 			}
 
-			root := mns.Root()
-			root.IncRef()
+			root := mns.Root(ctx)
 			defer root.DecRef(ctx)
 			for _, p := range tc.expectedPaths {
 				target := &vfs.PathOperation{

@@ -35,44 +35,44 @@ func TestPodMountHintsHappy(t *testing.T) {
 			MountPrefix + "mount2.options": "rw,private",
 		},
 	}
-	podHints, err := newPodMountHints(spec)
+	podHints, err := NewPodMountHints(spec)
 	if err != nil {
 		t.Fatalf("newPodMountHints failed: %v", err)
 	}
 
 	// Check that fields were set correctly.
-	mount1 := podHints.mounts["mount1"]
-	if want := "mount1"; want != mount1.name {
-		t.Errorf("mount1 name, want: %q, got: %q", want, mount1.name)
+	mount1 := podHints.Mounts["mount1"]
+	if want := "mount1"; want != mount1.Name {
+		t.Errorf("mount1 name, want: %q, got: %q", want, mount1.Name)
 	}
-	if want := "foo"; want != mount1.mount.Source {
-		t.Errorf("mount1 source, want: %q, got: %q", want, mount1.mount.Source)
+	if want := "foo"; want != mount1.Mount.Source {
+		t.Errorf("mount1 source, want: %q, got: %q", want, mount1.Mount.Source)
 	}
-	if want := "tmpfs"; want != mount1.mount.Type {
-		t.Errorf("mount1 type, want: %q, got: %q", want, mount1.mount.Type)
+	if want := "tmpfs"; want != mount1.Mount.Type {
+		t.Errorf("mount1 type, want: %q, got: %q", want, mount1.Mount.Type)
 	}
-	if want := pod; want != mount1.share {
-		t.Errorf("mount1 type, want: %q, got: %q", want, mount1.share)
+	if want := pod; want != mount1.Share {
+		t.Errorf("mount1 type, want: %q, got: %q", want, mount1.Share)
 	}
-	if want := []string(nil); !reflect.DeepEqual(want, mount1.mount.Options) {
-		t.Errorf("mount1 type, want: %q, got: %q", want, mount1.mount.Options)
+	if want := []string(nil); !reflect.DeepEqual(want, mount1.Mount.Options) {
+		t.Errorf("mount1 type, want: %q, got: %q", want, mount1.Mount.Options)
 	}
 
-	mount2 := podHints.mounts["mount2"]
-	if want := "mount2"; want != mount2.name {
-		t.Errorf("mount2 name, want: %q, got: %q", want, mount2.name)
+	mount2 := podHints.Mounts["mount2"]
+	if want := "mount2"; want != mount2.Name {
+		t.Errorf("mount2 name, want: %q, got: %q", want, mount2.Name)
 	}
-	if want := "bar"; want != mount2.mount.Source {
-		t.Errorf("mount2 source, want: %q, got: %q", want, mount2.mount.Source)
+	if want := "bar"; want != mount2.Mount.Source {
+		t.Errorf("mount2 source, want: %q, got: %q", want, mount2.Mount.Source)
 	}
-	if want := "bind"; want != mount2.mount.Type {
-		t.Errorf("mount2 type, want: %q, got: %q", want, mount2.mount.Type)
+	if want := "bind"; want != mount2.Mount.Type {
+		t.Errorf("mount2 type, want: %q, got: %q", want, mount2.Mount.Type)
 	}
-	if want := container; want != mount2.share {
-		t.Errorf("mount2 type, want: %q, got: %q", want, mount2.share)
+	if want := container; want != mount2.Share {
+		t.Errorf("mount2 type, want: %q, got: %q", want, mount2.Share)
 	}
-	if want := []string{"rw", "private"}; !reflect.DeepEqual(want, mount2.mount.Options) {
-		t.Errorf("mount2 type, want: %q, got: %q", want, mount2.mount.Options)
+	if want := []string{"rw", "private"}; !reflect.DeepEqual(want, mount2.Mount.Options) {
+		t.Errorf("mount2 type, want: %q, got: %q", want, mount2.Mount.Options)
 	}
 }
 
@@ -112,7 +112,7 @@ func TestPodMountHintsErrors(t *testing.T) {
 	} {
 		t.Run(tst.name, func(t *testing.T) {
 			spec := &specs.Spec{Annotations: tst.annotations}
-			podHints, err := newPodMountHints(spec)
+			podHints, err := NewPodMountHints(spec)
 			if err == nil || !strings.Contains(err.Error(), tst.error) {
 				t.Errorf("newPodMountHints invalid error, want: .*%s.*, got: %v", tst.error, err)
 			}
@@ -157,11 +157,11 @@ func TestPodMountHintsIgnore(t *testing.T) {
 	} {
 		t.Run(tst.name, func(t *testing.T) {
 			spec := &specs.Spec{Annotations: tst.annotations}
-			podHints, err := newPodMountHints(spec)
+			podHints, err := NewPodMountHints(spec)
 			if err != nil {
 				t.Errorf("newPodMountHints() failed: %v", err)
 			} else if podHints != nil {
-				if hint, ok := podHints.mounts["mount1"]; ok {
+				if hint, ok := podHints.Mounts["mount1"]; ok {
 					t.Errorf("hint was provided when it should have been omitted: %+v", hint)
 				}
 			}
@@ -178,13 +178,13 @@ func TestIgnoreInvalidMountOptions(t *testing.T) {
 			MountPrefix + "mount1.options": "rw,invalid,private",
 		},
 	}
-	podHints, err := newPodMountHints(spec)
+	podHints, err := NewPodMountHints(spec)
 	if err != nil {
 		t.Fatalf("newPodMountHints failed: %v", err)
 	}
-	mount1 := podHints.mounts["mount1"]
-	if want := []string{"rw", "private"}; !reflect.DeepEqual(want, mount1.mount.Options) {
-		t.Errorf("mount2 type, want: %q, got: %q", want, mount1.mount.Options)
+	mount1 := podHints.Mounts["mount1"]
+	if want := []string{"rw", "private"}; !reflect.DeepEqual(want, mount1.Mount.Options) {
+		t.Errorf("mount2 type, want: %q, got: %q", want, mount1.Mount.Options)
 	}
 }
 
@@ -233,7 +233,7 @@ func TestHintsCheckCompatible(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			master := mountHint{mount: specs.Mount{Options: tc.masterOpts}}
+			master := MountHint{Mount: specs.Mount{Options: tc.masterOpts}}
 			replica := specs.Mount{Options: tc.replicaOpts}
 			if err := master.checkCompatible(&replica); err != nil {
 				if !strings.Contains(err.Error(), tc.err) {

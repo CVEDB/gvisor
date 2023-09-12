@@ -26,13 +26,13 @@
 #include <sys/prctl.h>
 #include <sys/ucontext.h>
 
+#include "atomic.h"
 #include "sysmsg.h"
 #include "sysmsg_offsets.h"
 
 // TODO(b/271631387): These globals are shared between AMD64 and ARM64; move to
 // sysmsg_lib.c.
 struct arch_state __export_arch_state;
-uint64_t __export_context_decoupling_exp;
 uint64_t __export_stub_start;
 
 long __syscall(long n, long a1, long a2, long a3, long a4, long a5, long a6) {
@@ -101,13 +101,13 @@ void __export_sighandler(int signo, siginfo_t *siginfo, void *_ucontext) {
   struct sysmsg *sysmsg = sysmsg_addr(sp);
 
   if (sysmsg != sysmsg->self) panic(0xdeaddead);
-  int32_t thread_state = __atomic_load_n(&sysmsg->state, __ATOMIC_ACQUIRE);
+  int32_t thread_state = atomic_load(&sysmsg->state);
 
   uint32_t ctx_state = CONTEXT_STATE_INVALID;
   struct thread_context *ctx = NULL, *old_ctx = NULL;
-  if (__export_context_decoupling_exp &&
-      thread_state == THREAD_STATE_INITIALIZING) {
+  if (thread_state == THREAD_STATE_INITIALIZING) {
     // Find a new context and exit to restore it.
+    init_new_thread();
     goto init;
   }
 
@@ -129,11 +129,8 @@ void __export_sighandler(int signo, siginfo_t *siginfo, void *_ucontext) {
   }
   uint8_t *fpStatePointer =
       (uint8_t *)&ucontext->uc_mcontext.__reserved + kSigframeMagicHeaderLen;
-  if (__export_context_decoupling_exp) {
-    memcpy(ctx->fpstate, fpStatePointer, __export_arch_state.fp_len);
-  } else {
-    sysmsg->fpstate = (uint64_t)(fpStatePointer) - (uint64_t)sysmsg;
-  }
+
+  memcpy(ctx->fpstate, fpStatePointer, __export_arch_state.fp_len);
   ctx->tls = get_tls();
   ctx->siginfo = *siginfo;
   switch (signo) {
@@ -162,18 +159,13 @@ void __export_sighandler(int signo, siginfo_t *siginfo, void *_ucontext) {
 
 init:
   for (;;) {
-    if (__export_context_decoupling_exp) {
-      ctx = switch_context(sysmsg, ctx, ctx_state);
-    } else {
-      ctx->state = ctx_state;
-      wait_state(sysmsg, THREAD_STATE_EVENT);
-    }
+    ctx = switch_context(sysmsg, ctx, ctx_state);
 
-    if (__atomic_load_n(&ctx->interrupt, __ATOMIC_ACQUIRE) != 0) {
+    if (atomic_load(&ctx->interrupt) != 0) {
       // This context got interrupted while it was waiting in the queue.
       // Setup all the necessary bits to let the sentry know this context has
       // switched back because of it.
-      __atomic_store_n(&ctx->interrupt, 0, __ATOMIC_RELEASE);
+      atomic_store(&ctx->interrupt, 0);
       ctx_state = CONTEXT_STATE_FAULT;
       ctx->signo = SIGCHLD;
       ctx->siginfo.si_signo = SIGCHLD;
@@ -197,11 +189,10 @@ void restore_state(struct sysmsg *sysmsg, struct thread_context *ctx,
       (struct fpsimd_context *)&ucontext->uc_mcontext.__reserved;
   uint8_t *fpStatePointer = (uint8_t *)&fpctx->fpsr;
 
-  if (__export_context_decoupling_exp &&
-      __atomic_load_n(&ctx->fpstate_changed, __ATOMIC_ACQUIRE)) {
+  if (atomic_load(&ctx->fpstate_changed)) {
     memcpy(fpStatePointer, ctx->fpstate, __export_arch_state.fp_len);
   }
   ptregs_to_gregs(ucontext, &ctx->ptregs);
   set_tls(ctx->tls);
-  __atomic_store_n(&sysmsg->state, THREAD_STATE_NONE, __ATOMIC_RELEASE);
+  atomic_store(&sysmsg->state, THREAD_STATE_NONE);
 }

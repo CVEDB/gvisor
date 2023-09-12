@@ -7,6 +7,18 @@ package(
 )
 
 go_template_instance(
+    name = "context_list",
+    out = "context_list.go",
+    package = "systrap",
+    prefix = "context",
+    template = "//pkg/ilist:generic_list",
+    types = {
+        "Element": "*sharedContext",
+        "Linker": "*sharedContext",
+    },
+)
+
+go_template_instance(
     name = "subprocess_refs",
     out = "subprocess_refs.go",
     package = "systrap",
@@ -20,15 +32,17 @@ go_template_instance(
 go_library(
     name = "systrap",
     srcs = [
-        "context_decoupling_disable.go",
-        "context_decoupling_enable.go",
+        "context_list.go",
         "context_queue.go",
+        "context_queue_unsafe.go",
         "filters.go",
         "filters_amd64.go",
         "filters_arm64.go",
         "lib_amd64.s",
         "lib_arm64.s",
         "shared_context.go",
+        "shared_context_norace.go",
+        "shared_context_race.go",
         "stub_amd64.s",
         "stub_arm64.s",
         "stub_defs.go",
@@ -78,6 +92,7 @@ go_library(
         "//pkg/sentry/platform/systrap/usertrap",
         "//pkg/sentry/usage",
         "//pkg/sync",
+        "//pkg/syncevent",
         "@org_golang_x_sys//unix:go_default_library",
     ],
 )

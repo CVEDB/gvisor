@@ -18,21 +18,9 @@ go_template_instance(
     },
 )
 
-go_template_instance(
-    name = "atomicptr_netns",
-    out = "atomicptr_netns_unsafe.go",
-    package = "inet",
-    prefix = "Namespace",
-    template = "//pkg/sync/atomicptr:generic_atomicptr",
-    types = {
-        "Value": "Namespace",
-    },
-)
-
 go_library(
     name = "inet",
     srcs = [
-        "atomicptr_netns_unsafe.go",
         "context.go",
         "inet.go",
         "namespace.go",
@@ -44,6 +32,8 @@ go_library(
         "//pkg/atomicbitops",
         "//pkg/context",
         "//pkg/refs",
+        "//pkg/sentry/fsimpl/nsfs",
+        "//pkg/sentry/kernel/auth",
         "//pkg/tcpip",
         "//pkg/tcpip/stack",
     ],

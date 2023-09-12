@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
-	"gvisor.dev/gvisor/pkg/bufferv2"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/checker"
 	"gvisor.dev/gvisor/pkg/tcpip/checksum"
@@ -104,7 +104,7 @@ func TestStackNDPEndpointInvalidateDefaultRouter(t *testing.T) {
 		t.Fatalf("got ndpDisp.addr = %s, want = %s", ndpDisp.addr, lladdr1)
 	}
 
-	ndpDisp.addr = ""
+	ndpDisp.addr = tcpip.Address{}
 	ndpEP := ep.(stack.NDPEndpoint)
 	ndpEP.InvalidateDefaultRouter(lladdr1)
 	if ndpDisp.addr != lladdr1 {
@@ -189,7 +189,7 @@ func TestNeighborSolicitationWithSourceLinkLayerOption(t *testing.T) {
 			}
 
 			pktBuf := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Payload: bufferv2.MakeWithData(hdr.View()),
+				Payload: buffer.MakeWithData(hdr.View()),
 			})
 			e.InjectInbound(ProtocolNumber, pktBuf)
 			pktBuf.DecRef()
@@ -259,6 +259,7 @@ func TestNeighborSolicitationResponse(t *testing.T) {
 		naSrc                  tcpip.Address
 		naDst                  tcpip.Address
 		performsLinkResolution bool
+		forwardingEnabled      bool
 	}{
 		{
 			name:          "Unspecified source to solicited-node multicast destination",
@@ -391,6 +392,20 @@ func TestNeighborSolicitationResponse(t *testing.T) {
 			nsDst:     nicAddr,
 			nsInvalid: true,
 		},
+		{
+			name: "Specified source with 1 source ll to multicast destination with forwarding enabled",
+			nsOpts: header.NDPOptionsSerializer{
+				header.NDPSourceLinkLayerAddressOption(remoteLinkAddr0[:]),
+			},
+			nsSrc:             remoteAddr,
+			nsDst:             nicAddrSNMC,
+			nsInvalid:         false,
+			naDstLinkAddr:     remoteLinkAddr0,
+			naSolicited:       true,
+			naSrc:             nicAddr,
+			naDst:             remoteAddr,
+			forwardingEnabled: true,
+		},
 	}
 
 	for _, test := range tests {
@@ -398,6 +413,10 @@ func TestNeighborSolicitationResponse(t *testing.T) {
 			c := newTestContext()
 			defer c.cleanup()
 			s := c.s
+
+			if err := s.SetForwardingDefaultAndAllNICs(header.IPv6ProtocolNumber, test.forwardingEnabled); err != nil {
+				t.Fatalf("SetForwardingDefaultAndAllNICs(%t): %s", test.forwardingEnabled, err)
+			}
 
 			e := channel.New(1, 1280, nicLinkAddr)
 			defer e.Close()
@@ -451,7 +470,7 @@ func TestNeighborSolicitationResponse(t *testing.T) {
 			}
 
 			pktBuf := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Payload: bufferv2.MakeWithData(hdr.View()),
+				Payload: buffer.MakeWithData(hdr.View()),
 			})
 			e.InjectInbound(ProtocolNumber, pktBuf)
 			pktBuf.DecRef()
@@ -513,6 +532,7 @@ func TestNeighborSolicitationResponse(t *testing.T) {
 				na := header.NDPNeighborAdvert(pkt.MessageBody())
 				na.SetSolicitedFlag(true)
 				na.SetOverrideFlag(true)
+				na.SetRouterFlag(test.forwardingEnabled)
 				na.SetTargetAddress(test.nsSrc)
 				na.Options().Serialize(ser)
 				pkt.SetChecksum(header.ICMPv6Checksum(header.ICMPv6ChecksumParams{
@@ -530,7 +550,7 @@ func TestNeighborSolicitationResponse(t *testing.T) {
 					DstAddr:           nicAddr,
 				})
 				pktBuf := stack.NewPacketBuffer(stack.PacketBufferOptions{
-					Payload: bufferv2.MakeWithData(hdr.View()),
+					Payload: buffer.MakeWithData(hdr.View()),
 				})
 				e.InjectInbound(ProtocolNumber, pktBuf)
 				pktBuf.DecRef()
@@ -656,7 +676,7 @@ func TestNeighborAdvertisementWithTargetLinkLayerOption(t *testing.T) {
 				t.Fatalf("got invalid = %d, want = 0", got)
 			}
 			pktBuf := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Payload: bufferv2.MakeWithData(hdr.View()),
+				Payload: buffer.MakeWithData(hdr.View()),
 			})
 			e.InjectInbound(ProtocolNumber, pktBuf)
 			pktBuf.DecRef()
@@ -715,8 +735,8 @@ func TestNDPValidation(t *testing.T) {
 			DstAddr:           lladdr0,
 			ExtensionHeaders:  extHdrs,
 		})
-		buf := bufferv2.MakeWithData(ip)
-		buf.Append(bufferv2.NewViewWithData(payload))
+		buf := buffer.MakeWithData(ip)
+		buf.Append(buffer.NewViewWithData(payload))
 		pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
 			Payload: buf,
 		})
@@ -824,7 +844,7 @@ func TestNDPValidation(t *testing.T) {
 		},
 	}
 
-	subnet, err := tcpip.NewSubnet(lladdr1, tcpip.AddressMask(strings.Repeat("\xff", len(lladdr0))))
+	subnet, err := tcpip.NewSubnet(lladdr1, tcpip.MaskFrom(strings.Repeat("\xff", lladdr0.Len())))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1032,7 +1052,7 @@ func TestNeighborAdvertisementValidation(t *testing.T) {
 			}
 
 			pktBuf := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Payload: bufferv2.MakeWithData(hdr.View()),
+				Payload: buffer.MakeWithData(hdr.View()),
 			})
 			e.InjectInbound(header.IPv6ProtocolNumber, pktBuf)
 			pktBuf.DecRef()
@@ -1233,7 +1253,7 @@ func TestRouterAdvertValidation(t *testing.T) {
 			}
 
 			pktBuf := stack.NewPacketBuffer(stack.PacketBufferOptions{
-				Payload: bufferv2.MakeWithData(hdr.View()),
+				Payload: buffer.MakeWithData(hdr.View()),
 			})
 			e.InjectInbound(header.IPv6ProtocolNumber, pktBuf)
 			pktBuf.DecRef()

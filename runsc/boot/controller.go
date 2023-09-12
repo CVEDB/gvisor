@@ -269,6 +269,11 @@ type StartArgs struct {
 	// Optionally configured with the overlay2 flag.
 	NumOverlayFilestoreFDs int
 
+	// OverlayMediums contains information about how the gofer mounts have been
+	// overlaid. The first entry is for rootfs and the following entries are for
+	// bind mounts in Spec.Mounts (in the same order).
+	OverlayMediums []OverlayMedium
+
 	// FilePayload contains, in order:
 	//   * stdin, stdout, and stderr (optional: if terminal is disabled).
 	//   * file descriptors to overlay-backing host files (optional: for overlay2).
@@ -342,7 +347,7 @@ func (cm *containerManager) StartSubcontainer(args *StartArgs, _ *struct{}) erro
 		}
 	}()
 
-	if err := cm.l.startSubcontainer(args.Spec, args.Conf, args.CID, stdios, goferFDs, overlayFilestoreFDs); err != nil {
+	if err := cm.l.startSubcontainer(args.Spec, args.Conf, args.CID, stdios, goferFDs, overlayFilestoreFDs, args.OverlayMediums); err != nil {
 		log.Debugf("containerManager.StartSubcontainer failed, cid: %s, args: %+v, err: %v", args.CID, args, err)
 		return err
 	}
@@ -464,7 +469,8 @@ func (cm *containerManager) Restore(o *RestoreOpts, _ *struct{}) error {
 
 	// Set up the restore environment.
 	ctx := k.SupervisorContext()
-	mntr := newContainerMounter(&cm.l.root, cm.l.k, cm.l.mountHints, cm.l.productName, o.SandboxID)
+	// TODO(b/298078576): Need to process hints here probably
+	mntr := newContainerMounter(&cm.l.root, cm.l.k, cm.l.mountHints, cm.l.sharedMounts, cm.l.productName, o.SandboxID)
 	ctx, err = mntr.configureRestore(ctx)
 	if err != nil {
 		return fmt.Errorf("configuring filesystem restore: %v", err)

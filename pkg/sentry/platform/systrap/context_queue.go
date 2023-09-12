@@ -40,27 +40,48 @@ type contextQueue struct {
 	start uint32
 	// end is an index used for putting new contexts into the ringbuffer.
 	end uint32
+
 	// numActiveThreads indicates to the sentry how many stubs are running.
+	// It is changed only by stub threads.
 	numActiveThreads uint32
+	// numThreadsToWakeup is the number of threads requested by Sentry to wake up.
+	// The Sentry increments it and stub threads decrements.
+	numThreadsToWakeup uint32
 	// numActiveContext is a number of running and waiting contexts
-	numActiveContexts   uint32
+	numActiveContexts uint32
+	// numAwakeContexts is the number of awake contexts. It includes all
+	// active contexts and contexts that are running in the Sentry.
+	numAwakeContexts uint32
+
 	fastPathDisabledTS  uint64
 	fastPathFailedInRow uint32
-	ringbuffer          [maxContextQueueEntries]uint32
+	fastPathDisabled    uint32
+	ringbuffer          [maxContextQueueEntries]uint64
 }
+
+const (
+	// Each element of a contextQueue ring buffer is a sum of its index
+	// shifted by CQ_INDEX_SHIFT and context_id.
+	contextQueueIndexShift = 32
+)
 
 // LINT.ThenChange(./sysmsg/sysmsg_lib.c)
 
 func (q *contextQueue) init() {
 	for i := uint32(0); i < maxContextQueueEntries; i++ {
-		q.ringbuffer[i] = invalidContextID
+		q.ringbuffer[i] = uint64(invalidContextID)
 	}
-	atomic.StoreUint32(&q.start, 0)
-	atomic.StoreUint32(&q.end, 0)
+	// Allow tests to trigger overflows of start and end.
+	idx := ^uint32(0) - maxContextQueueEntries*4
+	atomic.StoreUint32(&q.start, idx)
+	atomic.StoreUint32(&q.end, idx)
 	atomic.StoreUint64(&q.fastPathDisabledTS, 0)
 	atomic.StoreUint32(&q.fastPathFailedInRow, 0)
 	atomic.StoreUint32(&q.numActiveThreads, 0)
+	atomic.StoreUint32(&q.numThreadsToWakeup, 0)
 	atomic.StoreUint32(&q.numActiveContexts, 0)
+	atomic.StoreUint32(&q.numAwakeContexts, 0)
+	atomic.StoreUint32(&q.fastPathDisabled, 0)
 }
 
 func (q *contextQueue) isEmpty() bool {
@@ -71,7 +92,13 @@ func (q *contextQueue) queuedContexts() uint32 {
 	return (atomic.LoadUint32(&q.end) + maxContextQueueEntries - atomic.LoadUint32(&q.start)) % maxContextQueueEntries
 }
 
-func (q *contextQueue) add(contextID uint32) uint32 {
+func (q *contextQueue) add(ctx *sharedContext, stubFastPathEnabled bool) uint32 {
+	if stubFastPathEnabled {
+		q.enableFastPath()
+	} else {
+		q.disableFastPath()
+	}
+	contextID := ctx.contextID
 	atomic.AddUint32(&q.numActiveContexts, 1)
 	next := atomic.AddUint32(&q.end, 1)
 	if (next % maxContextQueueEntries) ==
@@ -79,7 +106,17 @@ func (q *contextQueue) add(contextID uint32) uint32 {
 		// should be unreacheable
 		panic("contextQueue is full")
 	}
-	next = (next - 1) % maxContextQueueEntries
-	atomic.StoreUint32(&q.ringbuffer[next], contextID)
+	idx := next - 1
+	next = idx % maxContextQueueEntries
+	v := (uint64(idx) << contextQueueIndexShift) + uint64(contextID)
+	atomic.StoreUint64(&q.ringbuffer[next], v)
 	return next // remove me
+}
+
+func (q *contextQueue) disableFastPath() {
+	atomic.StoreUint32(&q.fastPathDisabled, 1)
+}
+
+func (q *contextQueue) enableFastPath() {
+	atomic.StoreUint32(&q.fastPathDisabled, 0)
 }

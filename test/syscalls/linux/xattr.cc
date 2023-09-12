@@ -105,6 +105,21 @@ TEST_F(XattrTest, XattrInvalidPrefix) {
               SyscallFailsWithErrno(EOPNOTSUPP));
 }
 
+TEST_F(XattrTest, SecurityCapacityXattr) {
+  SKIP_IF(!IsRunningOnGvisor());
+  const char* path = test_file_name_.c_str();
+  const char name[] = "security.capacity";
+  const std::string val = "";
+  EXPECT_THAT(lsetxattr(path, name, &val, val.size(), 0),
+              SyscallFailsWithErrno(EOPNOTSUPP));
+
+  int buf = 0;
+  EXPECT_THAT(lgetxattr(path, name, &buf, /*size=*/128),
+              SyscallFailsWithErrno(ENODATA));
+
+  EXPECT_THAT(lremovexattr(path, name), SyscallFailsWithErrno(EOPNOTSUPP));
+}
+
 // Do not allow save/restore cycles after making the test file read-only, as
 // the restore will fail to open it with r/w permissions.
 TEST_F(XattrTest, XattrReadOnly) {
@@ -185,7 +200,12 @@ TEST_F(XattrTest, XattrOnDirectory) {
   EXPECT_THAT(getxattr(dir.path().c_str(), name, nullptr, 0),
               SyscallSucceedsWithValue(0));
 
-  char list[sizeof(name)];
+  // Overlay may have private attributes. Even though it is not returned to
+  // userspace, it is counted against the `size` argument in listxattr(2).
+  // See fs/overlayfs/inode.c:ovl_listxattr(). Notice that `size` is not
+  // extended to accommodate for private attributes that are filtered later.
+  // So use a large enough buffer for xattr list.
+  char list[64];
   EXPECT_THAT(listxattr(dir.path().c_str(), list, sizeof(list)),
               SyscallSucceedsWithValue(sizeof(name)));
   EXPECT_STREQ(list, name);

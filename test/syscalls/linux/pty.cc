@@ -374,6 +374,8 @@ PosixErrorOr<size_t> PollAndReadFd(int fd, void* buf, size_t count,
         continue;
       }
       return PosixError(errno, "read failed");
+    } else if (n > 0 && (pfd.revents & POLLIN) == 0) {
+      return PosixError(EINVAL, "Poll said not readable but data was read");
     }
     completed += n;
     if (completed >= count) {
@@ -650,6 +652,29 @@ TEST_F(PtyTest, WriteReplicaToMaster) {
   EXPECT_EQ(memcmp(buf, kExpected, sizeof(kExpected)), 0);
 }
 
+// Verifies that data enqueued into the replica is still readable by the master
+// after the replica is closed.
+TEST_F(PtyTest, WriteReplicaToMasterReadAfterReplicaClosed) {
+  // N.B. by default, the master reads nothing until the replica writes a
+  // newline, and the master gets a carriage return.
+  constexpr char kInput[] = "hello\n";
+  constexpr char kExpected[] = "hello\r\n";
+
+  EXPECT_THAT(WriteFd(replica_.get(), kInput, sizeof(kInput) - 1),
+              SyscallSucceedsWithValue(sizeof(kInput) - 1));
+
+  // Close the replica.
+  replica_.reset();
+
+  char buf[sizeof(kExpected)] = {};
+  ExpectReadable(master_, sizeof(buf) - 1, buf);
+  EXPECT_EQ(memcmp(buf, kExpected, sizeof(kExpected)), 0);
+
+  // After all data has been read, the master should return EIO.
+  char c;
+  EXPECT_THAT(ReadFd(master_.get(), &c, 1), SyscallFailsWithErrno(EIO));
+}
+
 TEST_F(PtyTest, WriteInvalidUTF8) {
   char c = 0xff;
   ASSERT_THAT(syscall(__NR_write, master_.get(), &c, sizeof(c)),
@@ -740,6 +765,40 @@ TEST_F(PtyTest, TermiosONLCR) {
   t.c_oflag |= ONLCR;
   t.c_lflag &= ~ICANON;  // for byte-by-byte reading.
   ASSERT_THAT(ioctl(replica_.get(), TCSETS, &t), SyscallSucceeds());
+
+  char c = '\n';
+  ASSERT_THAT(WriteFd(replica_.get(), &c, 1), SyscallSucceedsWithValue(1));
+
+  // Extra byte for NUL for EXPECT_STREQ.
+  char buf[3] = {};
+  ExpectReadable(master_, 2, buf);
+  EXPECT_STREQ(buf, "\r\n");
+
+  ExpectFinished(replica_);
+}
+
+// ICRNL rewrites input \r to \n.
+TEST_F(PtyTest, TCSETSFTermiosICRNL) {
+  struct kernel_termios t = DefaultTermios();
+  t.c_iflag |= ICRNL;
+  t.c_lflag &= ~ICANON;  // for byte-by-byte reading.
+  ASSERT_THAT(ioctl(replica_.get(), TCSETSF, &t), SyscallSucceeds());
+
+  char c = '\r';
+  ASSERT_THAT(WriteFd(master_.get(), &c, 1), SyscallSucceedsWithValue(1));
+
+  ExpectReadable(replica_, 1, &c);
+  EXPECT_EQ(c, '\n');
+
+  ExpectFinished(replica_);
+}
+
+// ONLCR rewrites output \n to \r\n.
+TEST_F(PtyTest, TCSETSFTermiosONLCR) {
+  struct kernel_termios t = DefaultTermios();
+  t.c_oflag |= ONLCR;
+  t.c_lflag &= ~ICANON;  // for byte-by-byte reading.
+  ASSERT_THAT(ioctl(replica_.get(), TCSETSF, &t), SyscallSucceeds());
 
   char c = '\n';
   ASSERT_THAT(WriteFd(replica_.get(), &c, 1), SyscallSucceedsWithValue(1));

@@ -136,10 +136,6 @@ type context struct {
 	// this is also only meaningful if lastFaultSP is non-nil.
 	lastFaultIP hostarch.Addr
 
-	// sysmsgThread is a sysmsg thread descriptor which is used to execute
-	// application code. (Note: Unused if contextDecouplingExp=true).
-	sysmsgThread *sysmsgThread
-
 	// needRestoreFPState indicates that the FPU state has been changed by
 	// the Sentry and has to be updated on the stub thread.
 	needRestoreFPState bool
@@ -278,9 +274,6 @@ func (c *context) Interrupt() {
 
 // Release releases all platform resources used by the context.
 func (c *context) Release() {
-	if c.sysmsgThread != nil {
-		c.sysmsgThread.destroy()
-	}
 	if c.sharedContext != nil {
 		c.sharedContext.release()
 		c.sharedContext = nil
@@ -289,11 +282,13 @@ func (c *context) Release() {
 
 // PrepareSleep implements platform.Context.platform.PrepareSleep.
 func (c *context) PrepareSleep() {
-	if contextDecouplingExp {
-		return // When this is called context hasn't entered the context queue.
+	ctx := c.sharedContext
+	if ctx == nil {
+		return
 	}
-	if c.sysmsgThread != nil {
-		c.sysmsgThread.msg.DisableStubFastPath()
+	if !ctx.sleeping {
+		ctx.sleeping = true
+		ctx.subprocess.decAwakeContexts()
 	}
 }
 
@@ -301,6 +296,7 @@ func (c *context) PrepareSleep() {
 type Systrap struct {
 	platform.NoCPUPreemptionDetection
 	platform.UseHostGlobalMemoryBarrier
+	platform.DoesNotOwnPageTables
 
 	// memoryFile is used to create a stub sysmsg stack
 	// which is shared with the Sentry.
@@ -337,6 +333,8 @@ func New() (*Systrap, error) {
 		source.DecRef(nil)
 
 		globalPool.source = source
+
+		initSysmsgThreadPriority()
 	})
 
 	return &Systrap{memoryFile: mf}, nil

@@ -22,6 +22,7 @@ benchmark_test(
 benchmark_test(
     name = "fio_test",
     srcs = ["fio_test.go"],
+    data = ["//test/runner/fuse"],
     visibility = ["//:sandbox"],
     deps = [
         "//pkg/cleanup",
@@ -40,5 +41,6 @@ benchmark_test(
         "//pkg/test/dockerutil",
         "//test/benchmarks/fs/fsbench",
         "//test/benchmarks/harness",
+        "//test/benchmarks/tools",
     ],
 )

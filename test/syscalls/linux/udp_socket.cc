@@ -219,20 +219,7 @@ sockaddr_storage UdpSocketTest::InetAnyAddr() {
 }
 
 sockaddr_storage UdpSocketTest::InetLoopbackAddr() {
-  struct sockaddr_storage addr;
-  memset(&addr, 0, sizeof(addr));
-  AsSockAddr(&addr)->sa_family = GetParam();
-
-  if (GetParam() == AF_INET) {
-    auto sin = reinterpret_cast<struct sockaddr_in*>(&addr);
-    sin->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    sin->sin_port = htons(0);
-    return addr;
-  }
-  auto sin6 = reinterpret_cast<struct sockaddr_in6*>(&addr);
-  sin6->sin6_addr = in6addr_loopback;
-  sin6->sin6_port = htons(0);
-  return addr;
+  return gvisor::testing::InetLoopbackAddr(GetParam());
 }
 
 void UdpSocketTest::Disconnect(int sockfd) {
@@ -1587,10 +1574,6 @@ TEST_P(UdpSocketTest, FIONREADZeroLengthWriteShutdown) {
 }
 
 TEST_P(UdpSocketTest, SoNoCheckOffByDefault) {
-  // TODO(gvisor.dev/issue/1202): SO_NO_CHECK socket option not supported by
-  // hostinet.
-  SKIP_IF(IsRunningWithHostinet());
-
   int v = -1;
   socklen_t optlen = sizeof(v);
   ASSERT_THAT(getsockopt(bind_.get(), SOL_SOCKET, SO_NO_CHECK, &v, &optlen),
@@ -1600,10 +1583,6 @@ TEST_P(UdpSocketTest, SoNoCheckOffByDefault) {
 }
 
 TEST_P(UdpSocketTest, SoNoCheck) {
-  // TODO(gvisor.dev/issue/1202): SO_NO_CHECK socket option not supported by
-  // hostinet.
-  SKIP_IF(IsRunningWithHostinet());
-
   int v = kSockOptOn;
   socklen_t optlen = sizeof(v);
   ASSERT_THAT(setsockopt(bind_.get(), SOL_SOCKET, SO_NO_CHECK, &v, optlen),
@@ -2125,6 +2104,9 @@ class UdpSocketControlMessagesTest
 };
 
 TEST_P(UdpSocketControlMessagesTest, SetAndReceiveTOSOrTClass) {
+  // TODO(b/267210840): Test is flaky on hostinet.
+  SKIP_IF(IsRunningWithHostinet());
+
   // Enable receiving TOS and maybe TClass on the receiver.
   ASSERT_THAT(setsockopt(server_.get(), SOL_IP, IP_RECVTOS, &kSockOptOn,
                          sizeof(kSockOptOn)),
@@ -2448,6 +2430,21 @@ TEST_P(UdpSocketTest, SendPacketLargerThanSendBufOnNonBlockingSocket) {
       sendto(sock_.get(), buf, sizeof(buf), 0, AsSockAddr(&addr), sizeof(addr)),
       AnyOf(SyscallSucceedsWithValue(sizeof(buf)),
             SyscallFailsWithErrno(EAGAIN)));
+}
+
+TEST_P(UdpSocketTest, ReadShutdownOnBoundSocket) {
+  ASSERT_NO_ERRNO(BindLoopback());
+
+  // Bind `sock_` to loopback.
+  struct sockaddr_storage addr_storage = InetLoopbackAddr();
+  struct sockaddr* addr = AsSockAddr(&addr_storage);
+  ASSERT_NO_ERRNO(BindSocket(sock_.get(), addr));
+
+  int shut_opts[] = {SHUT_RD, SHUT_WR, SHUT_RDWR};
+  for (int shut_opt : shut_opts) {
+    EXPECT_THAT(shutdown(sock_.get(), shut_opt),
+                SyscallFailsWithErrno(ENOTCONN));
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(AllInetTests, UdpSocketControlMessagesTest,

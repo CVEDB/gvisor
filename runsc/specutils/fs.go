@@ -79,7 +79,9 @@ var propOptionsMap = map[string]mapping{
 
 // invalidOptions list options not allowed.
 //   - shared: sandbox must be isolated from the host. Propagating mount changes
-//     from the sandbox to the host breaks the isolation.
+//     from the sandbox to the host breaks the isolation. The sandbox's mount
+//     table is maintained in sentry memory. Mount operations from the application
+//     are not propagated to the host.
 var invalidOptions = []string{"shared", "rshared"}
 
 // OptionsToFlags converts mount options to syscall flags.
@@ -106,6 +108,16 @@ func optionsToFlags(opts []string, source map[string]mapping) uint32 {
 		}
 	}
 	return rv
+}
+
+// IsReadonlyMount returns true if the mount options has read only option.
+func IsReadonlyMount(opts []string) bool {
+	for _, o := range opts {
+		if o == "ro" {
+			return true
+		}
+	}
+	return false
 }
 
 // validateMount validates that spec mounts are correct.

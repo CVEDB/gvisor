@@ -91,6 +91,46 @@ doc(
     permalink = "/blog/2022/10/24/buffer-pooling/",
 )
 
+doc(
+    name = "systrap_release",
+    src = "2023-04-28-systrap-release.md",
+    authors = [
+        "bogomolov",
+    ],
+    layout = "post",
+    permalink = "/blog/2023/04/28/systrap-release/",
+)
+
+doc(
+    name = "rootfs_overlay",
+    src = "2023-05-08-rootfs-overlay.md",
+    authors = [
+        "ayushranjan",
+    ],
+    layout = "post",
+    permalink = "/blog/2023/05/08/rootfs-overlay/",
+)
+
+doc(
+    name = "gpu_pytorch_stable_diffusion",
+    src = "2023-06-20-gpu-pytorch-stable-diffusion.md",
+    authors = [
+        "eperot",
+    ],
+    layout = "post",
+    permalink = "/blog/2023/06/20/gpu-pytorch-stable-diffusion/",
+)
+
+doc(
+    name = "directfs",
+    src = "2023-06-27-directfs.md",
+    authors = [
+        "ayushranjan",
+    ],
+    layout = "post",
+    permalink = "/blog/2023/06/27/directfs/",
+)
+
 docs(
     name = "posts",
     deps = [

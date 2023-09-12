@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/atomicbitops"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/fdnotifier"
@@ -90,6 +91,7 @@ var AllowedRawSocketTypes = []AllowedSocketType{
 	{unix.AF_INET6, unix.SOCK_RAW, unix.IPPROTO_UDP},
 	{unix.AF_INET6, unix.SOCK_RAW, unix.IPPROTO_ICMPV6},
 
+	// AF_PACKET do not allow Write or SendMsg.
 	{unix.AF_PACKET, unix.SOCK_DGRAM, AllowAllProtocols},
 	{unix.AF_PACKET, unix.SOCK_RAW, AllowAllProtocols},
 }
@@ -118,6 +120,10 @@ type Socket struct {
 	// will return EWOULDBLOCK instead of blocking on the host. This allows us to
 	// handle blocking behavior independently in the sentry.
 	fd int
+
+	// recvClosed indicates that the socket has been shutdown for reading
+	// (SHUT_RD or SHUT_RDWR).
+	recvClosed atomicbitops.Bool
 }
 
 var _ = socket.Socket(&Socket{})
@@ -192,6 +198,11 @@ func (s *Socket) PWrite(ctx context.Context, dst usermem.IOSequence, offset int6
 
 // Write implements vfs.FileDescriptionImpl.
 func (s *Socket) Write(ctx context.Context, src usermem.IOSequence, opts vfs.WriteOptions) (int64, error) {
+	if s.family == linux.AF_PACKET {
+		// Don't allow Write for AF_PACKET.
+		return 0, linuxerr.EACCES
+	}
+
 	// All flags other than RWF_NOWAIT should be ignored.
 	// TODO(gvisor.dev/issue/2601): Support RWF_NOWAIT.
 	if opts.Flags != 0 {
@@ -352,7 +363,7 @@ func (s *Socket) Connect(t *kernel.Task, sockaddr []byte, blocking bool) *syserr
 	// to state CONNECTED, which we can do by calling connect() a second
 	// time ourselves.
 	_, _, errno = unix.Syscall(unix.SYS_CONNECT, uintptr(s.fd), uintptr(firstBytePtr(sockaddr)), uintptr(len(sockaddr)))
-	if errno != 0 {
+	if errno != 0 && errno != unix.EALREADY {
 		return syserr.FromError(translateIOSyscallError(errno))
 	}
 	return nil
@@ -384,7 +395,7 @@ func (s *Socket) Accept(t *kernel.Task, peerRequested bool, flags int, blocking 
 				}
 			} else {
 				var e waiter.Entry
-				e, ch = waiter.NewChannelEntry(waiter.ReadableEvents)
+				e, ch = waiter.NewChannelEntry(waiter.ReadableEvents | waiter.EventHUp | waiter.EventErr)
 				s.EventRegister(&e)
 				defer s.EventUnregister(&e)
 			}
@@ -439,7 +450,11 @@ func (s *Socket) Listen(_ *kernel.Task, backlog int) *syserr.Error {
 // Shutdown implements socket.Socket.Shutdown.
 func (s *Socket) Shutdown(_ *kernel.Task, how int) *syserr.Error {
 	switch how {
-	case unix.SHUT_RD, unix.SHUT_WR, unix.SHUT_RDWR:
+	case unix.SHUT_RD, unix.SHUT_RDWR:
+		// Mark the socket as closed for reading.
+		s.recvClosed.Store(true)
+		fallthrough
+	case unix.SHUT_WR:
 		return syserr.FromError(unix.Shutdown(s.fd, how))
 	default:
 		return syserr.ErrInvalidArgument
@@ -531,6 +546,10 @@ func (s *Socket) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, have
 			if n != 0 {
 				panic(fmt.Sprintf("CopyOutFrom: got (%d, %v), wanted (0, %v)", n, err, err))
 			}
+			// Are we closed for reading? No sense in trying to read if so.
+			if s.recvClosed.Load() {
+				break
+			}
 			if ch != nil {
 				if err = t.BlockWithDeadline(ch, haveDeadline, deadline); err != nil {
 					if linuxerr.Equals(linuxerr.ETIMEDOUT, err) {
@@ -540,7 +559,7 @@ func (s *Socket) RecvMsg(t *kernel.Task, dst usermem.IOSequence, flags int, have
 				}
 			} else {
 				var e waiter.Entry
-				e, ch = waiter.NewChannelEntry(waiter.ReadableEvents)
+				e, ch = waiter.NewChannelEntry(waiter.ReadableEvents | waiter.EventRdHUp | waiter.EventHUp | waiter.EventErr)
 				s.EventRegister(&e)
 				defer s.EventUnregister(&e)
 			}
@@ -663,6 +682,11 @@ const allowedSendMsgFlags = unix.MSG_DONTWAIT |
 
 // SendMsg implements socket.Socket.SendMsg.
 func (s *Socket) SendMsg(t *kernel.Task, src usermem.IOSequence, to []byte, flags int, haveDeadline bool, deadline ktime.Time, controlMessages socket.ControlMessages) (int, *syserr.Error) {
+	if s.family == linux.AF_PACKET {
+		// Don't allow SendMesg for AF_PACKET.
+		return 0, syserr.ErrPermissionDenied
+	}
+
 	// Only allow known and safe flags.
 	if flags&^allowedSendMsgFlags != 0 {
 		return 0, syserr.ErrInvalidArgument
@@ -743,7 +767,7 @@ func (s *Socket) SendMsg(t *kernel.Task, src usermem.IOSequence, to []byte, flag
 				}
 			} else {
 				var e waiter.Entry
-				e, ch = waiter.NewChannelEntry(waiter.WritableEvents)
+				e, ch = waiter.NewChannelEntry(waiter.WritableEvents | waiter.EventHUp | waiter.EventErr)
 				s.EventRegister(&e)
 				defer s.EventUnregister(&e)
 			}

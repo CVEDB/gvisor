@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	"gvisor.dev/gvisor/pkg/bufferv2"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/checker"
@@ -62,7 +62,7 @@ func checkVersion(t *testing.T, s *stack.Stack, nicID tcpip.NICID, v1 bool) {
 	mldEP.SetMLDVersion(ipv6.MLDVersion1)
 }
 
-func validateMLDPacket(t *testing.T, v *bufferv2.View, localAddress, remoteAddress tcpip.Address, mldType header.ICMPv6Type, groupAddress tcpip.Address) {
+func validateMLDPacket(t *testing.T, v *buffer.View, localAddress, remoteAddress tcpip.Address, mldType header.ICMPv6Type, groupAddress tcpip.Address) {
 	t.Helper()
 
 	defer v.Release()
@@ -80,7 +80,7 @@ func validateMLDPacket(t *testing.T, v *bufferv2.View, localAddress, remoteAddre
 	)
 }
 
-func validateMLDv2ReportPacket(t *testing.T, v *bufferv2.View, localAddress tcpip.Address, groupAddress tcpip.Address, recordType header.MLDv2ReportRecordType) {
+func validateMLDv2ReportPacket(t *testing.T, v *buffer.View, localAddress tcpip.Address, groupAddress tcpip.Address, recordType header.MLDv2ReportRecordType) {
 	t.Helper()
 
 	defer v.Release()
@@ -113,12 +113,12 @@ func TestIPv6JoinLeaveSolicitedNodeAddressPerformsMLD(t *testing.T) {
 	tests := []struct {
 		name            string
 		v1Compatibility bool
-		validate        func(t *testing.T, v *bufferv2.View, localAddress tcpip.Address, groupAddress tcpip.Address, leave bool)
+		validate        func(t *testing.T, v *buffer.View, localAddress tcpip.Address, groupAddress tcpip.Address, leave bool)
 	}{
 		{
 			name:            "V1 Compatibility",
 			v1Compatibility: true,
-			validate: func(t *testing.T, v *bufferv2.View, localAddress tcpip.Address, groupAddress tcpip.Address, leave bool) {
+			validate: func(t *testing.T, v *buffer.View, localAddress tcpip.Address, groupAddress tcpip.Address, leave bool) {
 				t.Helper()
 
 				remoteAddress := groupAddress
@@ -134,7 +134,7 @@ func TestIPv6JoinLeaveSolicitedNodeAddressPerformsMLD(t *testing.T) {
 		{
 			name:            "V2",
 			v1Compatibility: false,
-			validate: func(t *testing.T, v *bufferv2.View, localAddress tcpip.Address, groupAddress tcpip.Address, leave bool) {
+			validate: func(t *testing.T, v *buffer.View, localAddress tcpip.Address, groupAddress tcpip.Address, leave bool) {
 				t.Helper()
 
 				recordType := header.MLDv2ReportRecordChangeToExcludeMode
@@ -472,7 +472,7 @@ func createAndInjectMLDPacket(e *channel.Endpoint, mldType header.ICMPv6Type, ho
 	}))
 
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: bufferv2.MakeWithData(buf),
+		Payload: buffer.MakeWithData(buf),
 	})
 	e.InjectInbound(ipv6.ProtocolNumber, pkt)
 	pkt.DecRef()
@@ -591,7 +591,7 @@ func TestMLDSkipProtocol(t *testing.T) {
 
 	tests := []struct {
 		name         string
-		group        tcpip.Address
+		group        string
 		expectReport bool
 	}{
 		{
@@ -679,12 +679,12 @@ func TestMLDSkipProtocol(t *testing.T) {
 	subTests := []struct {
 		name            string
 		v1Compatibility bool
-		validate        func(t *testing.T, v *bufferv2.View, localAddress tcpip.Address, groupAddress tcpip.Address)
+		validate        func(t *testing.T, v *buffer.View, localAddress tcpip.Address, groupAddress tcpip.Address)
 	}{
 		{
 			name:            "V1 Compatibility",
 			v1Compatibility: true,
-			validate: func(t *testing.T, v *bufferv2.View, localAddress tcpip.Address, groupAddress tcpip.Address) {
+			validate: func(t *testing.T, v *buffer.View, localAddress tcpip.Address, groupAddress tcpip.Address) {
 				t.Helper()
 				validateMLDPacket(t, v, localAddress, groupAddress, header.ICMPv6MulticastListenerReport, groupAddress)
 			},
@@ -692,7 +692,7 @@ func TestMLDSkipProtocol(t *testing.T) {
 		{
 			name:            "V2",
 			v1Compatibility: false,
-			validate: func(t *testing.T, v *bufferv2.View, localAddress tcpip.Address, groupAddress tcpip.Address) {
+			validate: func(t *testing.T, v *buffer.View, localAddress tcpip.Address, groupAddress tcpip.Address) {
 				t.Helper()
 				validateMLDv2ReportPacket(t, v, localAddress, groupAddress, header.MLDv2ReportRecordChangeToExcludeMode)
 			},
@@ -730,13 +730,14 @@ func TestMLDSkipProtocol(t *testing.T) {
 						p.DecRef()
 					}
 
-					if err := s.JoinGroup(ipv6.ProtocolNumber, nicID, test.group); err != nil {
-						t.Fatalf("s.JoinGroup(%d, %d, %s): %s", ipv6.ProtocolNumber, nicID, test.group, err)
+					testGroup := tcpip.AddrFromSlice([]byte(test.group))
+					if err := s.JoinGroup(ipv6.ProtocolNumber, nicID, testGroup); err != nil {
+						t.Fatalf("s.JoinGroup(%d, %d, %s): %s", ipv6.ProtocolNumber, nicID, testGroup, err)
 					}
-					if isInGroup, err := s.IsInGroup(nicID, test.group); err != nil {
-						t.Fatalf("IsInGroup(%d, %s): %s", nicID, test.group, err)
+					if isInGroup, err := s.IsInGroup(nicID, testGroup); err != nil {
+						t.Fatalf("IsInGroup(%d, %s): %s", nicID, testGroup, err)
 					} else if !isInGroup {
-						t.Fatalf("got IsInGroup(%d, %s) = false, want = true", nicID, test.group)
+						t.Fatalf("got IsInGroup(%d, %s) = false, want = true", nicID, testGroup)
 					}
 
 					if !test.expectReport {
@@ -750,7 +751,7 @@ func TestMLDSkipProtocol(t *testing.T) {
 					if p := e.Read(); p.IsNil() {
 						t.Fatal("expected a report message to be sent")
 					} else {
-						subTest.validate(t, stack.PayloadSince(p.NetworkHeader()), linkLocalAddr, test.group)
+						subTest.validate(t, stack.PayloadSince(p.NetworkHeader()), linkLocalAddr, testGroup)
 						p.DecRef()
 					}
 				})

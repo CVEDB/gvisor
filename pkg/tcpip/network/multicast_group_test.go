@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"gvisor.dev/gvisor/pkg/bufferv2"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/checker"
@@ -284,7 +284,7 @@ func createAndInjectIGMPPacket(e *channel.Endpoint, igmpType byte, maxRespTime b
 	igmp.SetChecksum(header.IGMPCalculateChecksum(igmp))
 
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: bufferv2.MakeWithData(buf),
+		Payload: buffer.MakeWithData(buf),
 	})
 	e.InjectInbound(ipv4.ProtocolNumber, pkt)
 	pkt.DecRef()
@@ -325,7 +325,7 @@ func createAndInjectMLDPacket(e *channel.Endpoint, mldType uint8, maxRespDelay b
 	}))
 
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: bufferv2.MakeWithData(buf),
+		Payload: buffer.MakeWithData(buf),
 	})
 	e.InjectInbound(ipv6.ProtocolNumber, pkt)
 	pkt.DecRef()
@@ -501,7 +501,7 @@ func TestMGPReceiveCounters(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ctx := newMulticastTestContext(t, len(test.groupAddress) == header.IPv4AddressSize /* v4 */, true /* mgpEnabled */)
+			ctx := newMulticastTestContext(t, test.groupAddress.Len() == header.IPv4AddressSize /* v4 */, true /* mgpEnabled */)
 			defer ctx.cleanup()
 
 			test.rxMGPkt(ctx.e, test.headerType, test.maxRespTime, test.groupAddress, 0 /* extraLength */)
@@ -958,7 +958,7 @@ func TestMGPQueryMessages(t *testing.T) {
 			}{
 				{
 					name:          "Unspecified",
-					multicastAddr: tcpip.Address(strings.Repeat("\x00", len(test.multicastAddr))),
+					multicastAddr: tcpip.AddrFromSlice([]byte(strings.Repeat("\x00", test.multicastAddr.Len()))),
 					expectReport:  true,
 				},
 				{
@@ -969,9 +969,10 @@ func TestMGPQueryMessages(t *testing.T) {
 				{
 					name: "Specified other address",
 					multicastAddr: func() tcpip.Address {
-						addrBytes := []byte(test.multicastAddr)
+						addrCopy := test.multicastAddr
+						addrBytes := addrCopy.AsSlice()
 						addrBytes[len(addrBytes)-1]++
-						return tcpip.Address(addrBytes)
+						return tcpip.AddrFromSlice(addrBytes)
 					}(),
 					expectReport: false,
 				},
@@ -1567,7 +1568,7 @@ func TestMGPCoalescedQueryResponseRecords(t *testing.T) {
 	genAddr := func(bytes []byte, i uint16) tcpip.Address {
 		bytes[len(bytes)-1] = byte(i & 0xFF)
 		bytes[len(bytes)-2] = byte(i >> 8)
-		return tcpip.Address(bytes[:])
+		return tcpip.AddrFromSlice(bytes[:])
 	}
 
 	calcMaxRecordsPerMessage := func(hdrLen, recordLen uint16) uint16 {

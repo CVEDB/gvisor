@@ -114,6 +114,9 @@ type StartContainerArgs struct {
 	// ContainerID is the container for the process being executed.
 	ContainerID string `json:"container_id"`
 
+	// InitialCgroups is the set of cgroup controllers container needs to be initialised to.
+	InitialCgroups map[kernel.CgroupControllerType]string `json:"initial_cgroups"`
+
 	// Limits is the limit set for the process being executed.
 	Limits map[string]limits.Limit `json:"limits"`
 
@@ -294,6 +297,18 @@ func (l *Lifecycle) StartContainer(args *StartContainerArgs, _ *uint32) error {
 		}
 	}()
 
+	initialCgroups := make(map[kernel.Cgroup]struct{}, len(args.InitialCgroups))
+	cgroupRegistry := l.Kernel.CgroupRegistry()
+	// path is relative to the container's cgroup controller of specified type.
+	for initialCgroupController, path := range args.InitialCgroups {
+		cg, err := cgroupRegistry.FindCgroup(ctx, initialCgroupController, path)
+		if err != nil {
+			return fmt.Errorf("FindCgroup can't locate cgroup controller: %v err: %v", initialCgroupController, err)
+		}
+		initialCgroups[cg] = struct{}{}
+	}
+	initArgs.InitialCgroups = initialCgroups
+
 	tg, _, err := l.Kernel.CreateProcess(initArgs)
 	if err != nil {
 		return err
@@ -311,6 +326,7 @@ func (l *Lifecycle) StartContainer(args *StartContainerArgs, _ *uint32) error {
 	}
 
 	if _, ok := l.containerMap[initArgs.ContainerID]; ok {
+		l.mu.Unlock()
 		return fmt.Errorf("container id: %v already exists", initArgs.ContainerID)
 	}
 

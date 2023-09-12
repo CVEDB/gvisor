@@ -1,4 +1,4 @@
-load("//tools:defs.bzl", "go_library")
+load("//tools:defs.bzl", "go_library", "proto_library")
 
 package(
     default_applicable_licenses = ["//:license"],
@@ -8,7 +8,6 @@ package(
 go_library(
     name = "netstack",
     srcs = [
-        "device.go",
         "netstack.go",
         "netstack_state.go",
         "provider.go",
@@ -20,10 +19,12 @@ go_library(
         "//pkg/sentry:internal",
     ],
     deps = [
+        ":events_go_proto",
         "//pkg/abi/linux",
         "//pkg/abi/linux/errno",
         "//pkg/context",
         "//pkg/errors/linuxerr",
+        "//pkg/eventchannel",
         "//pkg/hostarch",
         "//pkg/log",
         "//pkg/marshal",
@@ -31,7 +32,6 @@ go_library(
         "//pkg/metric",
         "//pkg/refs",
         "//pkg/sentry/arch",
-        "//pkg/sentry/device",
         "//pkg/sentry/fsimpl/sockfs",
         "//pkg/sentry/inet",
         "//pkg/sentry/kernel",
@@ -53,6 +53,13 @@ go_library(
         "//pkg/tcpip/transport/udp",
         "//pkg/usermem",
         "//pkg/waiter",
+        "@org_golang_google_protobuf//proto:go_default_library",
         "@org_golang_x_sys//unix:go_default_library",
     ],
+)
+
+proto_library(
+    name = "events",
+    srcs = ["events.proto"],
+    visibility = ["//visibility:public"],
 )
