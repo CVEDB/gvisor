@@ -31,12 +31,14 @@ import (
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/sentry/platform"
+	"gvisor.dev/gvisor/pkg/sentry/syscalls/linux"
 	"gvisor.dev/gvisor/runsc/cmd"
 	"gvisor.dev/gvisor/runsc/cmd/trace"
 	"gvisor.dev/gvisor/runsc/cmd/util"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/flag"
 	"gvisor.dev/gvisor/runsc/specutils"
+	"gvisor.dev/gvisor/runsc/version"
 )
 
 var (
@@ -55,7 +57,7 @@ var (
 )
 
 // Main is the main entrypoint.
-func Main(version string) {
+func Main() {
 	// Help and flags commands are generated automatically.
 	help := cmd.NewHelp(subcommands.DefaultCommander)
 	help.Register(new(cmd.Platforms))
@@ -74,6 +76,7 @@ func Main(version string) {
 	subcommands.Register(new(cmd.List), "")
 	subcommands.Register(new(cmd.PS), "")
 	subcommands.Register(new(cmd.Pause), "")
+	subcommands.Register(new(cmd.PortForward), "")
 	subcommands.Register(new(cmd.Restore), "")
 	subcommands.Register(new(cmd.Resume), "")
 	subcommands.Register(new(cmd.Run), "")
@@ -117,7 +120,7 @@ func Main(version string) {
 	// Are we showing the version?
 	if *showVersion {
 		// The format here is the same as runc.
-		fmt.Fprintf(os.Stdout, "runsc version %s\n", version)
+		fmt.Fprintf(os.Stdout, "runsc version %s\n", version.Version())
 		fmt.Fprintf(os.Stdout, "spec: %s\n", specutils.Version)
 		os.Exit(0)
 	}
@@ -220,7 +223,7 @@ func Main(version string) {
 
 	log.Infof("***************************")
 	log.Infof("Args: %s", os.Args)
-	log.Infof("Version %s", version)
+	log.Infof("Version %s", version.Version())
 	log.Infof("GOOS: %s", runtime.GOOS)
 	log.Infof("GOARCH: %s", runtime.GOARCH)
 	log.Infof("PID: %d", os.Getpid())
@@ -229,6 +232,7 @@ func Main(version string) {
 	log.Infof("\t\tRootDir: %s", conf.RootDir)
 	log.Infof("\t\tPlatform: %v", conf.Platform)
 	log.Infof("\t\tFileAccess: %v", conf.FileAccess)
+	log.Infof("\t\tDirectfs: %t", conf.DirectFS)
 	overlay2 := conf.GetOverlay2()
 	log.Infof("\t\tOverlay: Root=%t, SubMounts=%t, Medium=%q", overlay2.RootMount, overlay2.SubMounts, overlay2.Medium)
 	log.Infof("\t\tNetwork: %v, logging: %t", conf.Network, conf.LogPackets)
@@ -244,6 +248,7 @@ func Main(version string) {
 		log.Warningf("Block the TERM signal. This is only safe in tests!")
 		signal.Ignore(unix.SIGTERM)
 	}
+	linux.SetAFSSyscallPanic(conf.TestOnlyAFSSyscallPanic)
 
 	// Call the subcommand and pass in the configuration.
 	var ws unix.WaitStatus

@@ -93,8 +93,8 @@ steps:
     <<: *source_test_presubmit
     label: ":world_map: Build runsc and pkg (AMD64)"
     commands:
-      - "make build OPTIONS=--build_tag_filters=-nogo TARGETS=//pkg/..."
-      - "make build OPTIONS=--build_tag_filters=-nogo TARGETS=//runsc/..."
+      - "make build TARGETS=//pkg/..."
+      - "make build TARGETS=//runsc/..."
     agents:
       arch: "amd64"
 
@@ -102,8 +102,8 @@ steps:
     <<: *source_test_presubmit
     label: ":world_map: Build runsc and pkg (ARM64)"
     commands:
-      - "make build OPTIONS=--build_tag_filters=-nogo TARGETS=//pkg/..."
-      - "make build OPTIONS=--build_tag_filters=-nogo TARGETS=//runsc/..."
+      - "make build TARGETS=//pkg/..."
+      - "make build TARGETS=//runsc/..."
     agents:
       arch: "arm64"
 
@@ -112,7 +112,7 @@ steps:
     <<: *source_test_continuous
     label: ":world_map: Build everything"
     commands:
-      - "make build OPTIONS=--build_tag_filters=-nogo TARGETS=//..."
+      - "make build TARGETS=//..."
 
   # Check that the Go branch builds. This is not technically required, as this build is maintained
   # as a GitHub action in order to preserve this maintaince across forks. However, providing the
@@ -251,7 +251,7 @@ steps:
   - <<: *common
     <<: *source_test
     label: ":muscle: System call tests (ARM64)"
-    command: make BAZEL_OPTIONS=--test_tag_filters=runsc_ptrace syscall-tests
+    command: make BAZEL_OPTIONS=--test_tag_filters=runsc_ptrace,runsc_systrap syscall-tests
     parallelism: 10
     agents:
       arch: "arm64"
@@ -271,7 +271,7 @@ steps:
     # See above: not truly a source test.
     <<: *source_test
     label: ":docker: Docker tests (cgroupv2)"
-    command: make docker-tests
+    command: make portforward-tests docker-tests
     agents:
       <<: *ubuntu_agents
       arch: "amd64"
@@ -430,7 +430,7 @@ steps:
   - <<: *common
     <<: *docker
     label: ":php: PHP runtime tests"
-    command: make RUNTIME_LOG_DIR=/tmp/$${BUILDKITE_JOB_ID} php8.1.1-runtime-tests
+    command: make php8.1.1-runtime-tests
     parallelism: 10
     agents:
       <<: *platform_specific_agents
@@ -439,7 +439,7 @@ steps:
   - <<: *common
     <<: *docker
     label: ":java: Java runtime tests"
-    command: make RUNTIME_LOG_DIR=/tmp/$${BUILDKITE_JOB_ID} java17-runtime-tests
+    command: make java17-runtime-tests
     parallelism: 40
     agents:
       <<: *platform_specific_agents
@@ -448,7 +448,7 @@ steps:
   - <<: *common
     <<: *docker
     label: ":golang: Go runtime tests"
-    command: make RUNTIME_LOG_DIR=/tmp/$${BUILDKITE_JOB_ID} go1.16-runtime-tests
+    command: make go1.20-runtime-tests
     parallelism: 10
     agents:
       <<: *platform_specific_agents
@@ -457,7 +457,7 @@ steps:
   - <<: *common
     <<: *docker
     label: ":node: NodeJS runtime tests"
-    command: make RUNTIME_LOG_DIR=/tmp/$${BUILDKITE_JOB_ID} nodejs16.13.2-runtime-tests
+    command: make nodejs16.13.2-runtime-tests
     parallelism: 10
     agents:
       <<: *platform_specific_agents
@@ -466,7 +466,7 @@ steps:
   - <<: *common
     <<: *docker
     label: ":python: Python runtime tests"
-    command: make RUNTIME_LOG_DIR=/tmp/$${BUILDKITE_JOB_ID} python3.10.2-runtime-tests
+    command: make python3.10.2-runtime-tests
     parallelism: 10
     agents:
       <<: *platform_specific_agents

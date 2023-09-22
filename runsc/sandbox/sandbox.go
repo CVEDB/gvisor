@@ -241,6 +241,13 @@ type Args struct {
 	// SinkFiles is the an ordered array of files to be used by seccheck sinks
 	// configured from the --pod-init-config file.
 	SinkFiles []*os.File
+
+	// PassFiles are user-supplied files from the host to be exposed to the
+	// sandboxed app.
+	PassFiles map[int]*os.File
+
+	// ExecFile is the file from the host used for program execution.
+	ExecFile *os.File
 }
 
 // New creates the sandbox process. The caller must call Destroy() on the
@@ -528,7 +535,17 @@ func (s *Sandbox) NewCGroup() (cgroup.Cgroup, error) {
 func (s *Sandbox) Execute(conf *config.Config, args *control.ExecArgs) (int32, error) {
 	log.Debugf("Executing new process in container %q in sandbox %q", args.ContainerID, s.ID)
 
-	if err := s.configureStdios(conf, args.Files); err != nil {
+	// Stdios are those files which have an FD <= 2 in the process. We do not
+	// want the ownership of other files to be changed by configureStdios.
+	var stdios []*os.File
+	for i, fd := range args.GuestFDs {
+		if fd > 2 || i >= len(args.Files) {
+			continue
+		}
+		stdios = append(stdios, args.Files[i])
+	}
+
+	if err := s.configureStdios(conf, stdios); err != nil {
 		return 0, err
 	}
 
@@ -551,6 +568,22 @@ func (s *Sandbox) Event(cid string) (*boot.EventOut, error) {
 	}
 	e.Event.ID = cid
 	return &e, nil
+}
+
+// PortForward starts port forwarding to the sandbox.
+func (s *Sandbox) PortForward(opts *boot.PortForwardOpts) error {
+	log.Debugf("Requesting port forward for container %q in sandbox %q: %+v", opts.ContainerID, s.ID, opts)
+	conn, err := s.sandboxConnect()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	if err := conn.Call(boot.ContMgrPortForward, opts, nil); err != nil {
+		return fmt.Errorf("port forwarding to sandbox: %v", err)
+	}
+
+	return nil
 }
 
 func (s *Sandbox) sandboxConnect() (*urpc.Client, error) {
@@ -581,6 +614,28 @@ func (s *Sandbox) connError(err error) error {
 func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyncFile *os.File) error {
 	donations := donation.Agency{}
 	defer donations.Close()
+
+	// pgalloc.MemoryFile (which provides application memory) sometimes briefly
+	// mlock(2)s ranges of memory in order to fault in a large number of pages at
+	// a time. Try to make RLIMIT_MEMLOCK unlimited so that it can do so. runsc
+	// expects to run in a memory cgroup that limits its memory usage as
+	// required.
+	// This needs to be done before exec'ing `runsc boot`, as that subcommand
+	// runs as an unprivileged user that will not be able to call `setrlimit`
+	// by itself. Calling `setrlimit` here will have the side-effect of setting
+	// the limit on the currently-running `runsc` process as well, but that
+	// should be OK too.
+	var rlim unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_MEMLOCK, &rlim); err != nil {
+		log.Warningf("Failed to get RLIMIT_MEMLOCK: %v", err)
+	} else if rlim.Cur != unix.RLIM_INFINITY || rlim.Max != unix.RLIM_INFINITY {
+		rlim.Cur = unix.RLIM_INFINITY
+		rlim.Max = unix.RLIM_INFINITY
+		if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, &rlim); err != nil {
+			// We may not have CAP_SYS_RESOURCE, so this failure may be expected.
+			log.Infof("Failed to set RLIMIT_MEMLOCK: %v", err)
+		}
+	}
 
 	//
 	// These flags must come BEFORE the "boot" command in cmd.Args.
@@ -738,14 +793,17 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 	s.UID = os.Getuid()
 	s.GID = os.Getgid()
 
-	// User namespace depends on the network type. Host network requires to run
-	// inside the user namespace specified in the spec or the current namespace
-	// if none is configured.
-	if conf.Network == config.NetworkHost {
+	// User namespace depends on the network type or whether access to the host
+	// filesystem is required. These features require to run inside the user
+	// namespace specified in the spec or the current namespace if none is
+	// configured.
+	if conf.Network == config.NetworkHost || conf.DirectFS {
 		if userns, ok := specutils.GetNS(specs.UserNamespace, args.Spec); ok {
 			log.Infof("Sandbox will be started in container's user namespace: %+v", userns)
 			nss = append(nss, userns)
 			specutils.SetUIDGIDMappings(cmd, args.Spec)
+			// We need to set UID and GID to have capabilities in a new user namespace.
+			cmd.SysProcAttr.Credential = &syscall.Credential{Uid: 0, Gid: 0}
 		} else {
 			log.Infof("Sandbox will be started in the current user namespace")
 		}
@@ -758,7 +816,6 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 		// bind-mount the executable inside it.
 		if conf.TestOnlyAllowRunAsCurrentUserWithoutChroot {
 			log.Warningf("Running sandbox in test mode without chroot. This is only safe in tests!")
-
 		} else if specutils.HasCapabilities(capability.CAP_SYS_ADMIN) {
 			log.Infof("Sandbox will be started in minimal chroot")
 			cmd.Args = append(cmd.Args, "--setup-root")
@@ -927,8 +984,13 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 		cmd.Args = append(cmd.Args, "--attached")
 	}
 
-	// nextFD must not be used beyond this point.
-	_ = donations.Transfer(cmd, nextFD)
+	if args.ExecFile != nil {
+		donations.Donate("exec-fd", args.ExecFile)
+	}
+
+	nextFD = donations.Transfer(cmd, nextFD)
+
+	_ = donation.DonateAndTransferCustomFiles(cmd, nextFD, args.PassFiles)
 
 	// Add container ID as the last argument.
 	cmd.Args = append(cmd.Args, s.ID)
@@ -1179,10 +1241,15 @@ func (s *Sandbox) GetRegisteredMetrics() (*metricpb.MetricRegistration, error) {
 }
 
 // ExportMetrics returns a snapshot of metric values from the sandbox in Prometheus format.
-func (s *Sandbox) ExportMetrics() (*prometheus.Snapshot, error) {
+func (s *Sandbox) ExportMetrics(opts control.MetricsExportOpts) (*prometheus.Snapshot, error) {
 	log.Debugf("Metrics export sandbox %q", s.ID)
-	data := &control.MetricsExportData{}
-	if err := s.call(boot.MetricsExport, &control.MetricsExportOpts{}, data); err != nil {
+	var data control.MetricsExportData
+	if err := s.call(boot.MetricsExport, &opts, &data); err != nil {
+		return nil, err
+	}
+	// Since we do not trust the output of the sandbox as-is, double-check that the options were
+	// respected.
+	if err := opts.Verify(&data); err != nil {
 		return nil, err
 	}
 	return data.Snapshot, nil
@@ -1305,7 +1372,7 @@ func (s *Sandbox) waitForStopped() error {
 			return nil
 		}
 		// The sandbox process is a child of the current process,
-		// so we can wait it and collect its zombie.
+		// so we can wait on it to terminate and collect its zombie.
 		if _, err := unix.Wait4(int(pid), &s.status, 0, nil); err != nil {
 			return fmt.Errorf("error waiting the sandbox process: %v", err)
 		}

@@ -28,8 +28,10 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/coretag"
+	"gvisor.dev/gvisor/pkg/cpuid"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/metric"
+	"gvisor.dev/gvisor/pkg/ring0"
 	"gvisor.dev/gvisor/pkg/sentry/platform"
 	"gvisor.dev/gvisor/runsc/boot"
 	"gvisor.dev/gvisor/runsc/cmd/util"
@@ -38,6 +40,24 @@ import (
 	"gvisor.dev/gvisor/runsc/profile"
 	"gvisor.dev/gvisor/runsc/specutils"
 )
+
+// Note that directfsSandboxCaps is the same as caps defined in gofer.go
+// except CAP_SYS_CHROOT because we don't need to chroot in directfs mode.
+var directfsSandboxCaps = []string{
+	"CAP_CHOWN",
+	"CAP_DAC_OVERRIDE",
+	"CAP_DAC_READ_SEARCH",
+	"CAP_FOWNER",
+	"CAP_FSETID",
+}
+
+// directfsSandboxLinuxCaps is the minimal set of capabilities needed by the
+// sandbox to operate on files in directfs mode.
+var directfsSandboxLinuxCaps = &specs.LinuxCapabilities{
+	Bounding:  directfsSandboxCaps,
+	Effective: directfsSandboxCaps,
+	Permitted: directfsSandboxCaps,
+}
 
 // Boot implements subcommands.Command for the "boot" command which starts a
 // new sandbox. It should not be called directly.
@@ -65,6 +85,12 @@ type Boot struct {
 	// stdioFDs are the fds for stdin, stdout, and stderr. They must be
 	// provided in that order.
 	stdioFDs intFlags
+
+	// passFDs are mappings of user-supplied host to guest file descriptors.
+	passFDs fdMappings
+
+	// execFD is the host file descriptor used for program execution.
+	execFD int
 
 	// applyCaps determines if capabilities defined in the spec should be applied
 	// to the process.
@@ -148,6 +174,8 @@ func (b *Boot) SetFlags(f *flag.FlagSet) {
 	f.IntVar(&b.deviceFD, "device-fd", -1, "FD for the platform device file")
 	f.Var(&b.ioFDs, "io-fds", "list of FDs to connect gofer clients. They must follow this order: root first, then mounts as defined in the spec")
 	f.Var(&b.stdioFDs, "stdio-fds", "list of FDs containing sandbox stdin, stdout, and stderr in that order")
+	f.Var(&b.passFDs, "pass-fd", "mapping of host to guest FDs. They must be in M:N format. M is the host and N the guest descriptor.")
+	f.IntVar(&b.execFD, "exec-fd", -1, "host file descriptor used for program execution.")
 	f.Var(&b.overlayFilestoreFDs, "overlay-filestore-fds", "FDs to the regular files that will back the tmpfs upper mount in the overlay mounts.")
 	f.IntVar(&b.userLogFD, "user-log-fd", 0, "file descriptor to write user logs to. 0 means no logging.")
 	f.IntVar(&b.startSyncFD, "start-sync-fd", -1, "required FD to used to synchronize sandbox startup")
@@ -172,22 +200,11 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 	// Set traceback level
 	debug.SetTraceback(conf.Traceback)
 
-	// pgalloc.MemoryFile (which provides application memory) sometimes briefly
-	// mlock(2)s ranges of memory in order to fault in a large number of pages at
-	// a time. Try to make RLIMIT_MEMLOCK unlimited so that it can do so. runsc
-	// expects to run in a memory cgroup that limits its memory usage as
-	// required.
-	var rlim unix.Rlimit
-	if err := unix.Getrlimit(unix.RLIMIT_MEMLOCK, &rlim); err != nil {
-		log.Warningf("Failed to get RLIMIT_MEMLOCK: %v", err)
-	} else if rlim.Cur != unix.RLIM_INFINITY || rlim.Max != unix.RLIM_INFINITY {
-		rlim.Cur = unix.RLIM_INFINITY
-		rlim.Max = unix.RLIM_INFINITY
-		if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, &rlim); err != nil {
-			// We may not have CAP_SYS_RESOURCE, so this failure may be expected.
-			log.Infof("Failed to set RLIMIT_MEMLOCK: %v", err)
-		}
-	}
+	// Initialize CPUID information.
+	cpuid.Initialize()
+
+	// Initialize ring0 library.
+	ring0.InitDefault()
 
 	if len(b.productName) == 0 {
 		// Do this before chroot takes effect, otherwise we can't read /sys.
@@ -217,9 +234,9 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 			// /proc is umounted from a forked process, because the
 			// current one is going to re-execute itself without
 			// capabilities.
-			cmd, w := b.execProcUmounter()
-			defer w.Close()
+			cmd, w := execProcUmounter()
 			defer cmd.Wait()
+			defer w.Close()
 			if b.procMountSyncFD != -1 {
 				panic("procMountSyncFD is set")
 			}
@@ -273,6 +290,10 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 			caps.Permitted = append(caps.Permitted, c)
 		}
 
+		if conf.DirectFS {
+			caps = specutils.MergeCapabilities(caps, directfsSandboxLinuxCaps)
+		}
+
 		// Remove --apply-caps and --setup-root arg to call myself. Both have
 		// already been done.
 		args := b.prepareArgs("setup-root", "apply-caps")
@@ -322,6 +343,13 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 	mountsFile.Close()
 	spec.Mounts = cleanMounts
 
+	if conf.DirectFS {
+		// sandbox should run with a umask of 0, because we want to preserve file
+		// modes exactly as sent by the sentry, which would have already applied
+		// the application umask.
+		unix.Umask(0)
+	}
+
 	if conf.EnableCoreTags {
 		if err := coretag.Enable(); err != nil {
 			util.Fatalf("Failed to core tag sentry: %v", err)
@@ -348,6 +376,8 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 		Device:              os.NewFile(uintptr(b.deviceFD), "platform device"),
 		GoferFDs:            b.ioFDs.GetArray(),
 		StdioFDs:            b.stdioFDs.GetArray(),
+		PassFDs:             b.passFDs.GetArray(),
+		ExecFD:              b.execFD,
 		OverlayFilestoreFDs: b.overlayFilestoreFDs.GetArray(),
 		NumCPU:              b.cpuNum,
 		TotalMem:            b.totalMem,
@@ -367,23 +397,8 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 
 	if b.procMountSyncFD != -1 {
 		l.PreSeccompCallback = func() {
-			syncFile := os.NewFile(uintptr(b.procMountSyncFD), "sync file")
-			buf := make([]byte, 1)
-			if w, err := syncFile.Write(buf); err != nil || w != 1 {
-				util.Fatalf("unable to write into the proc umounter descriptor: %v", err)
-			}
-			syncFile.Close()
-
-			var waitStatus unix.WaitStatus
-			if _, err := unix.Wait4(0, &waitStatus, 0, nil); err != nil {
-				util.Fatalf("error waiting for the proc umounter process: %v", err)
-			}
-			if !waitStatus.Exited() || waitStatus.ExitStatus() != 0 {
-				util.Fatalf("the proc umounter process failed: %v", waitStatus)
-			}
-			if err := unix.Access("/proc/self", unix.F_OK); err != unix.ENOENT {
-				util.Fatalf("/proc is still accessible")
-			}
+			// Umount /proc right before installing seccomp filters.
+			umountProc(b.procMountSyncFD)
 		}
 	}
 
@@ -450,9 +465,9 @@ func (b *Boot) prepareArgs(exclude ...string) []string {
 	return args
 }
 
-// execProcUmounter execute a child process that umounts /proc when the sks[1]
-// socket is closed.
-func (b *Boot) execProcUmounter() (*exec.Cmd, *os.File) {
+// execProcUmounter execute a child process that umounts /proc when the
+// returned pipe is closed.
+func execProcUmounter() (*exec.Cmd, *os.File) {
 	r, w, err := os.Pipe()
 	if err != nil {
 		util.Fatalf("error creating a pipe: %v", err)
@@ -469,4 +484,26 @@ func (b *Boot) execProcUmounter() (*exec.Cmd, *os.File) {
 		util.Fatalf("error executing umounter: %v", err)
 	}
 	return cmd, w
+}
+
+// umountProc writes to syncFD signalling the process started by
+// execProcUmounter() to umount /proc.
+func umountProc(syncFD int) {
+	syncFile := os.NewFile(uintptr(syncFD), "sync file")
+	buf := make([]byte, 1)
+	if w, err := syncFile.Write(buf); err != nil || w != 1 {
+		util.Fatalf("unable to write into the proc umounter descriptor: %v", err)
+	}
+	syncFile.Close()
+
+	var waitStatus unix.WaitStatus
+	if _, err := unix.Wait4(0, &waitStatus, 0, nil); err != nil {
+		util.Fatalf("error waiting for the proc umounter process: %v", err)
+	}
+	if !waitStatus.Exited() || waitStatus.ExitStatus() != 0 {
+		util.Fatalf("the proc umounter process failed: %v", waitStatus)
+	}
+	if err := unix.Access("/proc/self", unix.F_OK); err != unix.ENOENT {
+		util.Fatalf("/proc is still accessible")
+	}
 }

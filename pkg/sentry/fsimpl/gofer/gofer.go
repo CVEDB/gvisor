@@ -73,26 +73,24 @@ const Name = "9p"
 
 // Mount option names for goferfs.
 const (
-	moptTransport              = "trans"
-	moptReadFD                 = "rfdno"
-	moptWriteFD                = "wfdno"
-	moptAname                  = "aname"
-	moptDfltUID                = "dfltuid"
-	moptDfltGID                = "dfltgid"
-	moptCache                  = "cache"
-	moptForcePageCache         = "force_page_cache"
-	moptLimitHostFDTranslation = "limit_host_fd_translation"
-	moptOverlayfsStaleRead     = "overlayfs_stale_read"
+	moptTransport                = "trans"
+	moptReadFD                   = "rfdno"
+	moptWriteFD                  = "wfdno"
+	moptAname                    = "aname"
+	moptDfltUID                  = "dfltuid"
+	moptDfltGID                  = "dfltgid"
+	moptCache                    = "cache"
+	moptForcePageCache           = "force_page_cache"
+	moptLimitHostFDTranslation   = "limit_host_fd_translation"
+	moptOverlayfsStaleRead       = "overlayfs_stale_read"
+	moptDisableFileHandleSharing = "disable_file_handle_sharing"
 
 	// Directfs options.
-	moptDirectfs       = "directfs"
-	moptHostUDSConnect = "host_uds_connect"
-	moptHostUDSBind    = "host_uds_bind"
+	moptDirectfs = "directfs"
 )
 
 // Valid values for the "cache" mount option.
 const (
-	cacheNone                = "none"
 	cacheFSCache             = "fscache"
 	cacheFSCacheWritethrough = "fscache_writethrough"
 	cacheRemoteRevalidating  = "remote_revalidating"
@@ -287,14 +285,6 @@ type directfsOpts struct {
 	// If directfs is enabled, the gofer client does not make RPCs to the gofer
 	// process. Instead, it makes host syscalls to perform file operations.
 	enabled bool
-
-	// hostUDSBind dictates whether this mount can create host unix domain
-	// sockets.
-	hostUDSBind bool
-
-	// hostUDSConnect dictates whether this mount can connect to host unix domain
-	// sockets.
-	hostUDSConnect bool
 }
 
 // InteropMode controls the client's interaction with other remote filesystem
@@ -432,9 +422,6 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 			fsopts.interop = InteropModeExclusive
 		case cacheFSCacheWritethrough:
 			fsopts.interop = InteropModeWritethrough
-		case cacheNone:
-			fsopts.regularFilesUseSpecialFileFD = true
-			fallthrough
 		case cacheRemoteRevalidating:
 			fsopts.interop = InteropModeShared
 		default:
@@ -469,6 +456,10 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	}
 
 	// Handle simple flags.
+	if _, ok := mopts[moptDisableFileHandleSharing]; ok {
+		delete(mopts, moptDisableFileHandleSharing)
+		fsopts.regularFilesUseSpecialFileFD = true
+	}
 	if _, ok := mopts[moptForcePageCache]; ok {
 		delete(mopts, moptForcePageCache)
 		fsopts.forcePageCache = true
@@ -484,14 +475,6 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	if _, ok := mopts[moptDirectfs]; ok {
 		delete(mopts, moptDirectfs)
 		fsopts.directfs.enabled = true
-	}
-	if _, ok := mopts[moptHostUDSBind]; ok {
-		delete(mopts, moptHostUDSBind)
-		fsopts.directfs.hostUDSBind = true
-	}
-	if _, ok := mopts[moptHostUDSConnect]; ok {
-		delete(mopts, moptHostUDSConnect)
-		fsopts.directfs.hostUDSConnect = true
 	}
 	// fsopts.regularFilesUseSpecialFileFD can only be enabled by specifying
 	// "cache=none".
@@ -2214,4 +2197,41 @@ func (fd *fileDescription) LockPOSIX(ctx context.Context, uid fslock.UniqueID, o
 // UnlockPOSIX implements vfs.FileDescriptionImpl.UnlockPOSIX.
 func (fd *fileDescription) UnlockPOSIX(ctx context.Context, uid fslock.UniqueID, r fslock.LockRange) error {
 	return fd.Locks().UnlockPOSIX(ctx, uid, r)
+}
+
+// resolvingPath is just a wrapper around *vfs.ResolvingPath. It additionally
+// holds some information around the intent behind resolving the path.
+type resolvingPath struct {
+	*vfs.ResolvingPath
+
+	// excludeLast indicates whether the intent is to resolve until the last path
+	// component. If true, the last path component should remain unresolved.
+	excludeLast bool
+}
+
+func resolvingPathFull(rp *vfs.ResolvingPath) resolvingPath {
+	return resolvingPath{ResolvingPath: rp, excludeLast: false}
+}
+
+func resolvingPathParent(rp *vfs.ResolvingPath) resolvingPath {
+	return resolvingPath{ResolvingPath: rp, excludeLast: true}
+}
+
+func (rp *resolvingPath) done() bool {
+	if rp.excludeLast {
+		return rp.Final()
+	}
+	return rp.Done()
+}
+
+func (rp *resolvingPath) copy() resolvingPath {
+	return resolvingPath{
+		ResolvingPath: rp.ResolvingPath.Copy(),
+		excludeLast:   rp.excludeLast,
+	}
+}
+
+// Precondition: !rp.done() && rp.Component() is not "." or "..".
+func (rp *resolvingPath) getComponents(emit func(string) bool) {
+	rp.GetComponents(rp.excludeLast, emit)
 }

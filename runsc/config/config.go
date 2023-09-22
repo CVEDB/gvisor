@@ -27,6 +27,8 @@ import (
 
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/sentry/watchdog"
+	"gvisor.dev/gvisor/runsc/flag"
+	"gvisor.dev/gvisor/runsc/version"
 )
 
 // Config holds configuration that is not part of the runtime spec.
@@ -153,17 +155,6 @@ type Config struct {
 	// The value of this flag must also match across the two command lines.
 	MetricServer string `flag:"metric-server"`
 
-	// MetricServerAllowUnknownRoot, if set, makes the metric server tolerate a non-existent or bad
-	// --root directory, and will remain running regardless of its validity.
-	// This is useful if the existence of the --root directory depends on the state of the machine,
-	// e.g. it is only created after the first pod that uses runsc has been created.
-	MetricServerAllowUnknownRoot bool `flag:"metric-server-allow-unknown-root"`
-
-	// MetricExporterPrefix is added as prefix to all metric names.
-	// It is used to follow Prometheus's exporter convention, whereby all metric names should be
-	// prefixed by a name meaningfully identifying the software exporting the metric.
-	MetricExporterPrefix string `flag:"metric-exporter-prefix"`
-
 	// Strace indicates that strace should be enabled.
 	Strace bool `flag:"strace"`
 
@@ -286,6 +277,11 @@ type Config struct {
 	// asynchronous I/O operations.
 	IOUring bool `flag:"iouring"`
 
+	// DirectFS sets up the sandbox to directly access/mutate the filesystem from
+	// the sentry. Sentry runs with escalated privileges. Gofer process still
+	// exists, but is mostly idle. Not supported in rootless mode.
+	DirectFS bool `flag:"directfs"`
+
 	// TestOnlyAllowRunAsCurrentUserWithoutChroot should only be used in
 	// tests. It allows runsc to start the sandbox process as the current
 	// user, and without chrooting the sandbox process. This can be
@@ -300,6 +296,11 @@ type Config struct {
 	// parameters to the runtime from docker.
 	TestOnlyTestNameEnv string `flag:"TESTONLY-test-name-env"`
 
+	// TestOnlyAFSSyscallPanic should only be used in tests. It enables the
+	// alternate behaviour for afs_syscall to trigger a Go-runtime panic upon being
+	// called. This is useful for tests exercising gVisor panic-reporting.
+	TestOnlyAFSSyscallPanic bool `flag:"TESTONLY-afs-syscall-panic"`
+
 	// explicitlySet contains whether a flag was explicitly set on the command-line from which this
 	// Config was constructed. Nil when the Config was not initialized from a FlagSet.
 	explicitlySet map[string]struct{}
@@ -311,7 +312,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("overlay flag has been replaced with overlay2 flag")
 	}
 	if overlay2 := c.GetOverlay2(); c.FileAccess == FileAccessShared && overlay2.Enabled() {
-		return fmt.Errorf("overlay flag is incompatible with shared file access")
+		return fmt.Errorf("overlay flag is incompatible with shared file access for rootfs")
 	}
 	if c.NumNetworkChannels <= 0 {
 		return fmt.Errorf("num_network_channels must be > 0, got: %d", c.NumNetworkChannels)
@@ -371,17 +372,42 @@ type Bundle map[string]string
 // It is used as part of an annotation to specify that the user wants to apply a Bundle.
 type BundleName string
 
+// Validate validates that given flag string values map to actual flags in runsc.
+func (b Bundle) Validate() error {
+	flagSet := flag.NewFlagSet("tmp", flag.ContinueOnError)
+	RegisterFlags(flagSet)
+	for key, val := range b {
+		flag := flagSet.Lookup(key)
+		if flag == nil {
+			return fmt.Errorf("unknown flag %q", key)
+		}
+		if err := flagSet.Set(key, val); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // MetricMetadata returns key-value pairs that are useful to include in metrics
 // exported about the sandbox this config represents.
 func (c *Config) MetricMetadata() map[string]string {
+	var fsMode = "goferfs"
+	if c.DirectFS {
+		fsMode = "directfs"
+	}
 	return map[string]string{
-		"platform":  c.Platform,
-		"network":   c.Network.String(),
-		"numcores":  strconv.Itoa(runtime.NumCPU()),
-		"coretags":  strconv.FormatBool(c.EnableCoreTags),
-		"overlay":   c.Overlay2.String(),
-		"gofermode": "default",
-		"cpuarch":   runtime.GOARCH,
+		"version":  version.Version(),
+		"platform": c.Platform,
+		"network":  c.Network.String(),
+		"numcores": strconv.Itoa(runtime.NumCPU()),
+		"coretags": strconv.FormatBool(c.EnableCoreTags),
+		"overlay":  c.Overlay2.String(),
+		"fsmode":   fsMode,
+		"cpuarch":  runtime.GOARCH,
+		"go":       runtime.Version(),
+		// The "experiment" label is currently unused, but may be used to contain
+		// extra information about e.g. an experiment that may be enabled.
+		"experiment": "",
 	}
 }
 
@@ -672,13 +698,16 @@ type Overlay2 struct {
 }
 
 func defaultOverlay2() *Overlay2 {
-	return &Overlay2{}
+	// Rootfs overlay is enabled by default and backed by a file in rootfs itself.
+	return &Overlay2{RootMount: true, SubMounts: false, Medium: "self"}
 }
 
 // Set implements flag.Value.
 func (o *Overlay2) Set(v string) error {
 	if v == "none" {
-		// Defaults are correct.
+		o.RootMount = false
+		o.SubMounts = false
+		o.Medium = ""
 		return nil
 	}
 	vs := strings.Split(v, ":")

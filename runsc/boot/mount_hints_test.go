@@ -97,74 +97,6 @@ func TestPodMountHintsErrors(t *testing.T) {
 			error: "invalid mount name",
 		},
 		{
-			name: "missing source",
-			annotations: map[string]string{
-				MountPrefix + "mount1.type":  "tmpfs",
-				MountPrefix + "mount1.share": "pod",
-			},
-			error: "source field",
-		},
-		{
-			name: "missing type",
-			annotations: map[string]string{
-				MountPrefix + "mount1.source": "foo",
-				MountPrefix + "mount1.share":  "pod",
-			},
-			error: "type field",
-		},
-		{
-			name: "missing share",
-			annotations: map[string]string{
-				MountPrefix + "mount1.source": "foo",
-				MountPrefix + "mount1.type":   "tmpfs",
-			},
-			error: "share field",
-		},
-		{
-			name: "invalid field name",
-			annotations: map[string]string{
-				MountPrefix + "mount1.invalid": "foo",
-			},
-			error: "invalid mount annotation",
-		},
-		{
-			name: "invalid source",
-			annotations: map[string]string{
-				MountPrefix + "mount1.source": "",
-				MountPrefix + "mount1.type":   "tmpfs",
-				MountPrefix + "mount1.share":  "pod",
-			},
-			error: "source cannot be empty",
-		},
-		{
-			name: "invalid type",
-			annotations: map[string]string{
-				MountPrefix + "mount1.source": "foo",
-				MountPrefix + "mount1.type":   "invalid-type",
-				MountPrefix + "mount1.share":  "pod",
-			},
-			error: "invalid type",
-		},
-		{
-			name: "invalid share",
-			annotations: map[string]string{
-				MountPrefix + "mount1.source": "foo",
-				MountPrefix + "mount1.type":   "tmpfs",
-				MountPrefix + "mount1.share":  "invalid-share",
-			},
-			error: "invalid share",
-		},
-		{
-			name: "invalid options",
-			annotations: map[string]string{
-				MountPrefix + "mount1.source":  "foo",
-				MountPrefix + "mount1.type":    "tmpfs",
-				MountPrefix + "mount1.share":   "pod",
-				MountPrefix + "mount1.options": "invalid-option",
-			},
-			error: "unknown mount option",
-		},
-		{
 			name: "duplicate source",
 			annotations: map[string]string{
 				MountPrefix + "mount1.source": "foo",
@@ -188,6 +120,71 @@ func TestPodMountHintsErrors(t *testing.T) {
 				t.Errorf("newPodMountHints must return nil on failure: %+v", podHints)
 			}
 		})
+	}
+}
+
+// Tests that when a required mount annotation is missing, the entire mount
+// hint is omitted and ignored.
+func TestPodMountHintsIgnore(t *testing.T) {
+	for _, tst := range []struct {
+		name        string
+		annotations map[string]string
+	}{
+		{
+			name: "invalid source",
+			annotations: map[string]string{
+				MountPrefix + "mount1.source": "",
+				MountPrefix + "mount1.type":   "tmpfs",
+				MountPrefix + "mount1.share":  "pod",
+			},
+		},
+		{
+			name: "invalid type",
+			annotations: map[string]string{
+				MountPrefix + "mount1.source": "foo",
+				MountPrefix + "mount1.type":   "invalid",
+				MountPrefix + "mount1.share":  "pod",
+			},
+		},
+		{
+			name: "invalid share",
+			annotations: map[string]string{
+				MountPrefix + "mount1.source": "foo",
+				MountPrefix + "mount1.type":   "tmpfs",
+				MountPrefix + "mount1.share":  "invalid",
+			},
+		},
+	} {
+		t.Run(tst.name, func(t *testing.T) {
+			spec := &specs.Spec{Annotations: tst.annotations}
+			podHints, err := newPodMountHints(spec)
+			if err != nil {
+				t.Errorf("newPodMountHints() failed: %v", err)
+			} else if podHints != nil {
+				if hint, ok := podHints.mounts["mount1"]; ok {
+					t.Errorf("hint was provided when it should have been omitted: %+v", hint)
+				}
+			}
+		})
+	}
+}
+
+func TestIgnoreInvalidMountOptions(t *testing.T) {
+	spec := &specs.Spec{
+		Annotations: map[string]string{
+			MountPrefix + "mount1.source":  "foo",
+			MountPrefix + "mount1.type":    "tmpfs",
+			MountPrefix + "mount1.share":   "container",
+			MountPrefix + "mount1.options": "rw,invalid,private",
+		},
+	}
+	podHints, err := newPodMountHints(spec)
+	if err != nil {
+		t.Fatalf("newPodMountHints failed: %v", err)
+	}
+	mount1 := podHints.mounts["mount1"]
+	if want := []string{"rw", "private"}; !reflect.DeepEqual(want, mount1.mount.Options) {
+		t.Errorf("mount2 type, want: %q, got: %q", want, mount1.mount.Options)
 	}
 }
 

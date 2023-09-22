@@ -1,7 +1,10 @@
 load("//tools:defs.bzl", "more_shards", "most_shards")
 load("//test/runner:defs.bzl", "syscall_test")
 
-package(licenses = ["notice"])
+package(
+    default_applicable_licenses = ["//:license"],
+    licenses = ["notice"],
+)
 
 # Please keep syscall tests ordered alphabetically by name.
 
@@ -321,7 +324,9 @@ syscall_test(
     add_fusefs = True,
     add_overlay = True,
     test = "//test/syscalls/linux:link_test",
-    use_tmpfs = True,  # gofer needs CAP_DAC_READ_SEARCH to use AT_EMPTY_PATH with linkat(2)
+    # TODO(gvisor.dev/issue/6739): Remove use_tmpfs=True once gofer filesystem
+    # supports hard links correctly.
+    use_tmpfs = True,
 )
 
 syscall_test(
@@ -405,6 +410,7 @@ syscall_test(
 )
 
 syscall_test(
+    add_hostinet = True,
     test = "//test/syscalls/linux:network_namespace_test",
 )
 
@@ -422,14 +428,17 @@ syscall_test(
 )
 
 syscall_test(
+    add_hostinet = True,
     test = "//test/syscalls/linux:packet_socket_dgram_test",
 )
 
 syscall_test(
+    add_hostinet = True,
     test = "//test/syscalls/linux:packet_socket_raw_test",
 )
 
 syscall_test(
+    add_hostinet = True,
     test = "//test/syscalls/linux:packet_socket_test",
 )
 
@@ -444,6 +453,7 @@ syscall_test(
 
 syscall_test(
     size = "medium",
+    add_hostinet = True,
     # Takes too long under gotsan to run.
     tags = ["nogotsan"],
     test = "//test/syscalls/linux:ping_socket_test",
@@ -554,14 +564,17 @@ syscall_test(
 )
 
 syscall_test(
+    add_hostinet = True,
     test = "//test/syscalls/linux:raw_socket_hdrincl_test",
 )
 
 syscall_test(
+    add_hostinet = True,
     test = "//test/syscalls/linux:raw_socket_icmp_test",
 )
 
 syscall_test(
+    add_hostinet = True,
     shard_count = more_shards,
     test = "//test/syscalls/linux:raw_socket_test",
 )
@@ -735,6 +748,7 @@ syscall_test(
 
 syscall_test(
     size = "large",
+    add_hostinet = True,
     container = True,
     one_sandbox = False,
     shard_count = most_shards,
@@ -743,6 +757,7 @@ syscall_test(
 
 syscall_test(
     size = "large",
+    add_hostinet = True,
     shard_count = most_shards,
     # Takes too long for TSAN. Creates a lot of TCP sockets.
     tags = ["nogotsan"],
@@ -807,6 +822,7 @@ syscall_test(
 
 syscall_test(
     size = "medium",
+    add_hostinet = True,
     test = "//test/syscalls/linux:socket_ipv6_udp_unbound_loopback_test",
 )
 
@@ -820,24 +836,30 @@ syscall_test(
 )
 
 syscall_test(
+    add_hostinet = True,
     test = "//test/syscalls/linux:socket_ipv4_udp_unbound_loopback_netlink_test",
 )
 
 syscall_test(
+    add_hostinet = True,
     test = "//test/syscalls/linux:socket_ipv6_udp_unbound_loopback_netlink_test",
 )
 
 syscall_test(
+    # TODO(b/267210840): Flaky on hostinet.
+    # add_hostinet = True,
     shard_count = more_shards,
     test = "//test/syscalls/linux:socket_ip_unbound_test",
 )
 
 syscall_test(
+    add_hostinet = True,
     shard_count = more_shards,
     test = "//test/syscalls/linux:socket_ipv6_unbound_test",
 )
 
 syscall_test(
+    add_hostinet = True,
     test = "//test/syscalls/linux:socket_ip_unbound_netlink_test",
 )
 
@@ -847,22 +869,27 @@ syscall_test(
 )
 
 syscall_test(
+    add_hostinet = True,
     test = "//test/syscalls/linux:socket_netlink_test",
 )
 
 syscall_test(
+    add_hostinet = True,
     test = "//test/syscalls/linux:socket_netlink_route_test",
 )
 
 syscall_test(
+    add_hostinet = True,
     test = "//test/syscalls/linux:socket_netlink_uevent_test",
 )
 
 syscall_test(
+    add_hostinet = True,
     test = "//test/syscalls/linux:socket_blocking_local_test",
 )
 
 syscall_test(
+    add_hostinet = True,
     test = "//test/syscalls/linux:socket_blocking_ip_test",
 )
 
@@ -872,11 +899,13 @@ syscall_test(
 )
 
 syscall_test(
+    add_hostinet = True,
     test = "//test/syscalls/linux:socket_non_stream_blocking_udp_test",
 )
 
 syscall_test(
     size = "large",
+    add_hostinet = True,
     test = "//test/syscalls/linux:socket_stream_blocking_local_test",
 )
 
@@ -887,11 +916,13 @@ syscall_test(
 
 syscall_test(
     size = "medium",
+    add_hostinet = True,
     test = "//test/syscalls/linux:socket_stream_local_test",
 )
 
 syscall_test(
     size = "medium",
+    add_hostinet = True,
     test = "//test/syscalls/linux:socket_stream_nonblock_local_test",
 )
 
@@ -1066,7 +1097,8 @@ syscall_test(
 
 syscall_test(
     size = "medium",
-    add_hostinet = True,
+    # TODO(b/267210840): Flaky on hostinet.
+    # add_hostinet = True,
     shard_count = more_shards,
     test = "//test/syscalls/linux:udp_socket_test",
 )

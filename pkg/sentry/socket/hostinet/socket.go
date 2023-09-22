@@ -29,6 +29,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/sockfs"
 	"gvisor.dev/gvisor/pkg/sentry/hostfd"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
+	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	ktime "gvisor.dev/gvisor/pkg/sentry/kernel/time"
 	"gvisor.dev/gvisor/pkg/sentry/socket"
 	"gvisor.dev/gvisor/pkg/sentry/socket/control"
@@ -50,10 +51,17 @@ const (
 
 // AllowedSocketType is a tuple of socket family, type, and protocol.
 type AllowedSocketType struct {
-	Family   int
-	Type     int
+	Family int
+	Type   int
+
+	// Protocol of AllowAllProtocols indicates that all protocols are
+	// allowed.
 	Protocol int
 }
+
+// AllowAllProtocols indicates that all protocols are allowed by the stack and
+// in the syscall filters.
+var AllowAllProtocols = -1
 
 // AllowedSocketTypes are the socket types which are supported by hostinet.
 // These are used to validate the arguments to socket(), and also to generate
@@ -66,6 +74,24 @@ var AllowedSocketTypes = []AllowedSocketType{
 
 	{unix.AF_INET6, unix.SOCK_STREAM, unix.IPPROTO_TCP},
 	{unix.AF_INET6, unix.SOCK_DGRAM, unix.IPPROTO_UDP},
+	{unix.AF_INET6, unix.SOCK_DGRAM, unix.IPPROTO_ICMPV6},
+}
+
+// AllowedRawSocketTypes are the socket types which are supported by hostinet
+// with raw sockets enabled.
+var AllowedRawSocketTypes = []AllowedSocketType{
+	{unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_RAW},
+	{unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_TCP},
+	{unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_UDP},
+	{unix.AF_INET, unix.SOCK_RAW, unix.IPPROTO_ICMP},
+
+	{unix.AF_INET6, unix.SOCK_RAW, unix.IPPROTO_RAW},
+	{unix.AF_INET6, unix.SOCK_RAW, unix.IPPROTO_TCP},
+	{unix.AF_INET6, unix.SOCK_RAW, unix.IPPROTO_UDP},
+	{unix.AF_INET6, unix.SOCK_RAW, unix.IPPROTO_ICMPV6},
+
+	{unix.AF_PACKET, unix.SOCK_DGRAM, AllowAllProtocols},
+	{unix.AF_PACKET, unix.SOCK_RAW, AllowAllProtocols},
 }
 
 // Socket implements socket.Socket (and by extension, vfs.FileDescriptionImpl)
@@ -136,8 +162,8 @@ func (s *Socket) Epollable() bool {
 }
 
 // Ioctl implements vfs.FileDescriptionImpl.
-func (s *Socket) Ioctl(ctx context.Context, uio usermem.IO, args arch.SyscallArguments) (uintptr, error) {
-	return ioctl(ctx, s.fd, uio, args)
+func (s *Socket) Ioctl(ctx context.Context, uio usermem.IO, sysno uintptr, args arch.SyscallArguments) (uintptr, error) {
+	return ioctl(ctx, s.fd, uio, sysno, args)
 }
 
 // PRead implements vfs.FileDescriptionImpl.PRead.
@@ -185,15 +211,23 @@ type socketProvider struct {
 // Socket implements socket.Provider.Socket.
 func (p *socketProvider) Socket(t *kernel.Task, stypeflags linux.SockType, protocol int) (*vfs.FileDescription, *syserr.Error) {
 	// Check that we are using the host network stack.
-	stack := t.NetworkContext()
-	if stack == nil {
+	netCtx := t.NetworkContext()
+	if netCtx == nil {
 		return nil, nil
 	}
-	if _, ok := stack.(*Stack); !ok {
+	stack, ok := netCtx.(*Stack)
+	if !ok {
 		return nil, nil
 	}
 
 	stype := stypeflags & linux.SOCK_TYPE_MASK
+
+	// Raw and packet sockets require CAP_NET_RAW.
+	if stype == linux.SOCK_RAW || p.family == linux.AF_PACKET {
+		if creds := auth.CredentialsFromContext(t); !creds.HasCapability(linux.CAP_NET_RAW) {
+			return nil, syserr.ErrNotPermitted
+		}
+	}
 
 	// Convert generic IPPROTO_IP protocol to the actual protocol depending
 	// on family and type.
@@ -208,8 +242,11 @@ func (p *socketProvider) Socket(t *kernel.Task, stypeflags linux.SockType, proto
 
 	// Validate the socket based on family, type, and protocol.
 	var supported bool
-	for _, allowed := range AllowedSocketTypes {
-		if p.family == allowed.Family && int(stype) == allowed.Type && protocol == allowed.Protocol {
+	for _, allowed := range stack.allowedSocketTypes {
+		isAllowedFamily := p.family == allowed.Family
+		isAllowedType := int(stype) == allowed.Type
+		isAllowedProtocol := protocol == allowed.Protocol || allowed.Protocol == AllowAllProtocols
+		if isAllowedFamily && isAllowedType && isAllowedProtocol {
 			supported = true
 			break
 		}
@@ -222,7 +259,8 @@ func (p *socketProvider) Socket(t *kernel.Task, stypeflags linux.SockType, proto
 
 	// Conservatively ignore all flags specified by the application and add
 	// SOCK_NONBLOCK since socketOperations requires it.
-	fd, err := unix.Socket(p.family, int(stype)|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, protocol)
+	st := int(stype) | unix.SOCK_NONBLOCK | unix.SOCK_CLOEXEC
+	fd, err := unix.Socket(p.family, st, protocol)
 	if err != nil {
 		return nil, syserr.FromError(err)
 	}
@@ -442,6 +480,7 @@ func (s *Socket) recvMsgFromHost(iovs []unix.Iovec, flags int, senderRequested b
 const allowedRecvMsgFlags = unix.MSG_CTRUNC |
 	unix.MSG_DONTWAIT |
 	unix.MSG_ERRQUEUE |
+	unix.MSG_OOB |
 	unix.MSG_PEEK |
 	unix.MSG_TRUNC |
 	unix.MSG_WAITALL
@@ -615,10 +654,17 @@ func parseUnixControlMessages(unixControlMessages []unix.SocketControlMessage) s
 	return controlMessages
 }
 
+const allowedSendMsgFlags = unix.MSG_DONTWAIT |
+	unix.MSG_EOR |
+	unix.MSG_FASTOPEN |
+	unix.MSG_MORE |
+	unix.MSG_NOSIGNAL |
+	unix.MSG_OOB
+
 // SendMsg implements socket.Socket.SendMsg.
 func (s *Socket) SendMsg(t *kernel.Task, src usermem.IOSequence, to []byte, flags int, haveDeadline bool, deadline ktime.Time, controlMessages socket.ControlMessages) (int, *syserr.Error) {
 	// Only allow known and safe flags.
-	if flags&^(unix.MSG_DONTWAIT|unix.MSG_EOR|unix.MSG_FASTOPEN|unix.MSG_MORE|unix.MSG_NOSIGNAL) != 0 {
+	if flags&^allowedSendMsgFlags != 0 {
 		return 0, syserr.ErrInvalidArgument
 	}
 
@@ -745,7 +791,16 @@ func (s *Socket) Type() (family int, skType linux.SockType, protocol int) {
 }
 
 func init() {
-	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
-		socket.RegisterProvider(family, &socketProvider{family})
+	// Register all families in AllowedSocketTypes and AllowedRawSocket
+	// types. If we don't allow raw sockets, they will be rejected in the
+	// Socket call.
+	registered := make(map[int]struct{})
+	for _, sockType := range append(AllowedSocketTypes, AllowedRawSocketTypes...) {
+		fam := sockType.Family
+		if _, ok := registered[fam]; ok {
+			continue
+		}
+		socket.RegisterProvider(fam, &socketProvider{fam})
+		registered[fam] = struct{}{}
 	}
 }

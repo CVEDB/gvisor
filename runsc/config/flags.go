@@ -15,12 +15,15 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
+	"text/template"
 
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/refs"
@@ -55,8 +58,6 @@ func RegisterFlags(flagSet *flag.FlagSet) {
 
 	// Metrics flags.
 	flagSet.String("metric-server", "", "if set, export metrics on this address. This may either be 1) 'addr:port' to export metrics on a specific network interface address, 2) ':port' for exporting metrics on all interfaces, or 3) an absolute path to a Unix Domain Socket. The substring '%ID%' will be replaced by the container ID, and '%RUNTIME_ROOT%' by the root. This flag must be specified in both `runsc metric-server` and `runsc create`, and their values must match.")
-	flagSet.Bool("metric-server-allow-unknown-root", false, "if set, the metric server will keep running regardless of the existence of --root or the metric server's ability to access it.")
-	flagSet.String("metric-exporter-prefix", "runsc_", "prefix for all metric names, following Prometheus exporter convention")
 
 	// Debugging flags: strace related
 	flagSet.Bool("strace", false, "enable strace.")
@@ -99,6 +100,7 @@ func RegisterFlags(flagSet *flag.FlagSet) {
 	flagSet.Int("fdlimit", -1, "Specifies a limit on the number of host file descriptors that can be open. Applies separately to the sentry and gofer. Note: each file in the sandbox holds more than one host FD open.")
 	flagSet.Int("dcache", -1, "Set the global dentry cache size. This acts as a coarse-grained control on the number of host FDs simultaneously open by the sentry. If negative, per-mount caches are used.")
 	flagSet.Bool("iouring", false, "TEST ONLY; Enables io_uring syscalls in the sentry. Support is experimental and very limited.")
+	flagSet.Bool("directfs", false, "directly access the container filesystems from the sentry. Sentry runs with higher privileges.")
 
 	// Flags that control sandbox runtime behavior: network related.
 	flagSet.Var(networkTypePtr(NetworkSandbox), "network", "specifies which network to use: sandbox (default), host, none. Using network inside the sandbox is more secure because it's isolated from the host network.")
@@ -117,6 +119,7 @@ func RegisterFlags(flagSet *flag.FlagSet) {
 	flagSet.Bool("TESTONLY-unsafe-nonroot", false, "TEST ONLY; do not ever use! This skips many security measures that isolate the host from the sandbox.")
 	flagSet.String("TESTONLY-test-name-env", "", "TEST ONLY; do not ever use! Used for automated tests to improve logging.")
 	flagSet.Bool("TESTONLY-allow-packet-endpoint-write", false, "TEST ONLY; do not ever use! Used for tests to allow writes on packet sockets.")
+	flagSet.Bool("TESTONLY-afs-syscall-panic", false, "TEST ONLY; do not ever use! Used for tests exercising gVisor panic reporting.")
 }
 
 // overrideAllowlist lists all flags that can be changed using OCI
@@ -198,13 +201,109 @@ func NewFromFlags(flagSet *flag.FlagSet) (*Config, error) {
 	return conf, nil
 }
 
-// ToFlags returns a slice of flags that correspond to the given Config.
-func (c *Config) ToFlags() []string {
-	var rv []string
-
-	// Construct a temporary set for default plumbing.
+// NewFromBundle makes a new config from a Bundle.
+func NewFromBundle(bundle Bundle) (*Config, error) {
+	if err := bundle.Validate(); err != nil {
+		return nil, err
+	}
 	flagSet := flag.NewFlagSet("tmp", flag.ContinueOnError)
 	RegisterFlags(flagSet)
+	conf := &Config{explicitlySet: map[string]struct{}{}}
+
+	obj := reflect.ValueOf(conf).Elem()
+	st := obj.Type()
+	for i := 0; i < st.NumField(); i++ {
+		f := st.Field(i)
+		name, ok := f.Tag.Lookup("flag")
+		if !ok {
+			continue
+		}
+		fl := flagSet.Lookup(name)
+		if fl == nil {
+			return nil, fmt.Errorf("flag %q not found", name)
+		}
+		val, ok := bundle[name]
+		if !ok {
+			continue
+		}
+		if err := flagSet.Set(name, val); err != nil {
+			return nil, fmt.Errorf("error setting flag %s=%q: %w", name, val, err)
+		}
+		conf.Override(flagSet, name, val, true)
+
+		conf.explicitlySet[name] = struct{}{}
+	}
+	return conf, nil
+}
+
+// ToFlags returns a slice of flags that correspond to the given Config.
+func (c *Config) ToFlags() []string {
+	flagSet := flag.NewFlagSet("tmp", flag.ContinueOnError)
+	RegisterFlags(flagSet)
+
+	var rv []string
+	keyVals := c.keyVals(flagSet, false /*onlyIfSet*/)
+	for name, val := range keyVals {
+		rv = append(rv, fmt.Sprintf("--%s=%s", name, val))
+	}
+
+	// Construct a temporary set for default plumbing.
+	return rv
+}
+
+// KeyVal is a key value pair. It is used so ToContainerdConfigTOML returns
+// predictable ordering for runsc flags.
+type KeyVal struct {
+	Key string
+	Val string
+}
+
+// ContainerdConfigOptions contains arguments for ToContainerdConfigTOML.
+type ContainerdConfigOptions struct {
+	BinaryPath string
+	RootPath   string
+	Options    map[string]string
+	RunscFlags []KeyVal
+}
+
+// ToContainerdConfigTOML turns a given config into a format for a k8s containerd config.toml file.
+// See: https://gvisor.dev/docs/user_guide/containerd/quick_start/
+func (c *Config) ToContainerdConfigTOML(opts ContainerdConfigOptions) (string, error) {
+	flagSet := flag.NewFlagSet("tmp", flag.ContinueOnError)
+	RegisterFlags(flagSet)
+	keyVals := c.keyVals(flagSet, true /*onlyIfSet*/)
+	keys := []string{}
+	for k := range keyVals {
+		keys = append(keys, k)
+	}
+
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		opts.RunscFlags = append(opts.RunscFlags, KeyVal{k, keyVals[k]})
+	}
+
+	const temp = `{{if .BinaryPath}}binary_name = "{{.BinaryPath}}"{{end}}
+{{if .RootPath}}root = "{{.RootPath}}"{{end}}
+{{if .Options}}{{ range $key, $value := .Options}}{{$key}} = "{{$value}}"
+{{end}}{{end}}{{if .RunscFlags}}[runsc_config]
+{{ range $fl:= .RunscFlags}}  {{$fl.Key}} = "{{$fl.Val}}"
+{{end}}{{end}}`
+
+	t := template.New("temp")
+	t, err := t.Parse(temp)
+	if err != nil {
+		return "", err
+	}
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, opts); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+func (c *Config) keyVals(flagSet *flag.FlagSet, onlyIfSet bool) map[string]string {
+	keyVals := make(map[string]string)
 
 	obj := reflect.ValueOf(c).Elem()
 	st := obj.Type()
@@ -217,11 +316,11 @@ func (c *Config) ToFlags() []string {
 		}
 		val := getVal(obj.Field(i))
 
-		flag := flagSet.Lookup(name)
-		if flag == nil {
+		fl := flagSet.Lookup(name)
+		if fl == nil {
 			panic(fmt.Sprintf("Flag %q not found", name))
 		}
-		if val == flag.DefValue {
+		if val == fl.DefValue || onlyIfSet {
 			// If this config wasn't populated from a FlagSet, don't plumb through default flags.
 			if c.explicitlySet == nil {
 				continue
@@ -232,9 +331,9 @@ func (c *Config) ToFlags() []string {
 				continue
 			}
 		}
-		rv = append(rv, fmt.Sprintf("--%s=%s", flag.Name, val))
+		keyVals[fl.Name] = val
 	}
-	return rv
+	return keyVals
 }
 
 // Override writes a new value to a flag.
@@ -277,7 +376,7 @@ func (c *Config) isOverrideAllowed(name string, value string) error {
 	if c.AllowFlagOverride {
 		return nil
 	}
-	// If the global override flag is not enabled, check if individual flag is
+	// If the global override flag is not enabled, check if the individual flag is
 	// safe to apply.
 	if allow, ok := overrideAllowlist[name]; ok {
 		if allow.check != nil {
@@ -293,7 +392,7 @@ func (c *Config) isOverrideAllowed(name string, value string) error {
 // ApplyBundles applies the given bundles by name.
 // It returns an error if a bundle doesn't exist, or if the given
 // bundles have conflicting flag values.
-// Config values which are already specified prior to calling ApplyBundles do not change.
+// Config values which are already specified prior to calling ApplyBundles are overridden.
 func (c *Config) ApplyBundles(flagSet *flag.FlagSet, bundleNames ...BundleName) error {
 	// Populate a map from flag name to flag value to bundle name.
 	flagToValueToBundleName := make(map[string]map[string]BundleName)
@@ -311,7 +410,6 @@ func (c *Config) ApplyBundles(flagSet *flag.FlagSet, bundleNames ...BundleName) 
 			valueToBundleName[val] = bundleName
 		}
 	}
-
 	// Check for conflicting flag values between the bundles.
 	for flagName, valueToBundleName := range flagToValueToBundleName {
 		if len(valueToBundleName) == 1 {
@@ -345,17 +443,16 @@ func (c *Config) ApplyBundles(flagSet *flag.FlagSet, bundleNames ...BundleName) 
 		// Note: We verified earlier that valueToBundleName has length 1,
 		// so this loop executes exactly once per flag.
 		for val, bundleName := range valueToBundleName {
-			if isFlagExplicitlySet(flagSet, flagName) {
-				if prevValue != val {
-					log.Infof("Bundle %s is supposed to have the effect of setting flag --%s to %q, but this flag was also explicitly set to --%s=%q on the command-line; the command-line value --%s=%q takes precedence.", bundleName, flagName, val, flagName, prevValue, flagName, prevValue)
-				}
+			if prevValue == val {
 				continue
+			}
+			if isFlagExplicitlySet(flagSet, flagName) {
+				log.Infof("Flag --%s has explicitly-set value %q, but bundle %s takes precedence and is overriding its value to --%s=%q.", flagName, prevValue, bundleName, flagName, val)
+			} else {
+				log.Infof("Overriding flag --%s=%q from applying bundle %s.", flagName, val, bundleName)
 			}
 			if err := c.Override(flagSet, flagName, val /* force= */, true); err != nil {
 				return err
-			}
-			if prevValue != val {
-				log.Infof("Applying bundle %s: flag --%s has been updated from --%s=%q to --%s=%q", bundleName, flagName, flagName, prevValue, flagName, val)
 			}
 		}
 	}

@@ -22,7 +22,7 @@ import (
 )
 
 // hostInetFilters contains syscalls that are needed by sentry/socket/hostinet.
-func hostInetFilters() seccomp.SyscallRules {
+func hostInetFilters(allowRawSockets bool) seccomp.SyscallRules {
 	rules := seccomp.SyscallRules{
 		unix.SYS_ACCEPT4: []seccomp.Rule{
 			{
@@ -39,11 +39,11 @@ func hostInetFilters() seccomp.SyscallRules {
 		unix.SYS_IOCTL: []seccomp.Rule{
 			{
 				seccomp.MatchAny{},
-				seccomp.EqualTo(unix.TIOCOUTQ),
+				seccomp.EqualTo(unix.SIOCGIFCONF),
 			},
 			{
 				seccomp.MatchAny{},
-				seccomp.EqualTo(unix.TIOCINQ),
+				seccomp.EqualTo(unix.SIOCETHTOOL),
 			},
 			{
 				seccomp.MatchAny{},
@@ -51,7 +51,31 @@ func hostInetFilters() seccomp.SyscallRules {
 			},
 			{
 				seccomp.MatchAny{},
-				seccomp.EqualTo(unix.SIOCGIFCONF),
+				seccomp.EqualTo(unix.SIOCGIFHWADDR),
+			},
+			{
+				seccomp.MatchAny{},
+				seccomp.EqualTo(unix.SIOCGIFINDEX),
+			},
+			{
+				seccomp.MatchAny{},
+				seccomp.EqualTo(unix.SIOCGIFMTU),
+			},
+			{
+				seccomp.MatchAny{},
+				seccomp.EqualTo(unix.SIOCGIFNAME),
+			},
+			{
+				seccomp.MatchAny{},
+				seccomp.EqualTo(unix.SIOCGIFNETMASK),
+			},
+			{
+				seccomp.MatchAny{},
+				seccomp.EqualTo(unix.TIOCOUTQ),
+			},
+			{
+				seccomp.MatchAny{},
+				seccomp.EqualTo(unix.TIOCINQ),
 			},
 		},
 		unix.SYS_LISTEN:   {},
@@ -77,16 +101,45 @@ func hostInetFilters() seccomp.SyscallRules {
 		unix.SYS_WRITEV: {},
 	}
 
+	// Need NETLINK_ROUTE and stream sockets to query host interfaces and
+	// routes.
+	socketRules := []seccomp.Rule{
+		seccomp.Rule{
+			seccomp.EqualTo(unix.AF_NETLINK),
+			seccomp.EqualTo(unix.SOCK_RAW | unix.SOCK_CLOEXEC),
+			seccomp.EqualTo(unix.NETLINK_ROUTE),
+		},
+		seccomp.Rule{
+			seccomp.EqualTo(unix.AF_INET),
+			seccomp.EqualTo(unix.SOCK_STREAM),
+			seccomp.EqualTo(0),
+		},
+		seccomp.Rule{
+			seccomp.EqualTo(unix.AF_INET6),
+			seccomp.EqualTo(unix.SOCK_STREAM),
+			seccomp.EqualTo(0),
+		},
+	}
+
 	// Generate rules for socket creation based on hostinet's supported
 	// socket types.
-	socketRules := []seccomp.Rule{}
-	for _, sock := range hostinet.AllowedSocketTypes {
-		socketRules = append(socketRules, seccomp.Rule{
+	stypes := hostinet.AllowedSocketTypes
+	if allowRawSockets {
+		stypes = append(stypes, hostinet.AllowedRawSocketTypes...)
+	}
+	for _, sock := range stypes {
+		rule := seccomp.Rule{
 			seccomp.EqualTo(sock.Family),
-			// We always set SOCK_NONBLOCK and SOCK_CLOEXEC
+			// We always set SOCK_NONBLOCK and SOCK_CLOEXEC.
 			seccomp.EqualTo(sock.Type | linux.SOCK_NONBLOCK | linux.SOCK_CLOEXEC),
+			// Match specific protocol by default.
 			seccomp.EqualTo(sock.Protocol),
-		})
+		}
+		if sock.Protocol == hostinet.AllowAllProtocols {
+			// Change protocol filter to MatchAny.
+			rule[2] = seccomp.MatchAny{}
+		}
+		socketRules = append(socketRules, rule)
 	}
 	rules[unix.SYS_SOCKET] = socketRules
 
@@ -94,6 +147,7 @@ func hostInetFilters() seccomp.SyscallRules {
 	// socket options.
 	getSockOptRules := []seccomp.Rule{}
 	setSockOptRules := []seccomp.Rule{}
+
 	for _, opt := range hostinet.SockOpts {
 		if opt.AllowGet {
 			getSockOptRules = append(getSockOptRules, seccomp.Rule{

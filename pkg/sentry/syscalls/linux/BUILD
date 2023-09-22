@@ -1,6 +1,9 @@
 load("//tools:defs.bzl", "go_library", "go_test")
 
-package(licenses = ["notice"])
+package(
+    default_applicable_licenses = ["//:license"],
+    licenses = ["notice"],
+)
 
 go_library(
     name = "linux",
@@ -10,6 +13,7 @@ go_library(
         "path.go",
         "points.go",
         "sigset.go",
+        "sys_afs_syscall.go",
         "sys_aio.go",
         "sys_capability.go",
         "sys_clone_amd64.go",
@@ -65,6 +69,7 @@ go_library(
     deps = [
         "//pkg/abi",
         "//pkg/abi/linux",
+        "//pkg/atomicbitops",
         "//pkg/bits",
         "//pkg/bpf",
         "//pkg/context",

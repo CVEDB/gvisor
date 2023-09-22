@@ -1,6 +1,9 @@
 load("//tools:defs.bzl", "go_library", "go_test")
 
-package(licenses = ["notice"])
+package(
+    default_applicable_licenses = ["//:license"],
+    licenses = ["notice"],
+)
 
 go_library(
     name = "cmd",
@@ -16,6 +19,7 @@ go_library(
         "do.go",
         "events.go",
         "exec.go",
+        "fd_mapping.go",
         "gofer.go",
         "help.go",
         "install.go",
@@ -29,6 +33,7 @@ go_library(
         "path.go",
         "pause.go",
         "platforms.go",
+        "portforward.go",
         "ps.go",
         "read_control.go",
         "restore.go",
@@ -49,15 +54,19 @@ go_library(
     deps = [
         "//pkg/abi/linux",
         "//pkg/atomicbitops",
+        "//pkg/cleanup",
         "//pkg/coretag",
         "//pkg/coverage",
+        "//pkg/cpuid",
         "//pkg/log",
         "//pkg/metric",
         "//pkg/prometheus",
+        "//pkg/ring0",
         "//pkg/sentry/control",
         "//pkg/sentry/kernel",
         "//pkg/sentry/kernel/auth",
         "//pkg/sentry/platform",
+        "//pkg/state",
         "//pkg/state/pretty",
         "//pkg/state/statefile",
         "//pkg/sync",
@@ -105,7 +114,6 @@ go_test(
         "//pkg/sentry/control",
         "//pkg/sentry/kernel/auth",
         "//pkg/test/testutil",
-        "//pkg/urpc",
         "//runsc/cmd/util",
         "//runsc/config",
         "//runsc/container",

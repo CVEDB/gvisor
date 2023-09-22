@@ -1,5 +1,7 @@
 load("//tools:defs.bzl", "go_library")
 
+package(default_applicable_licenses = ["//:license"])
+
 licenses(["notice"])
 
 go_library(
@@ -28,6 +30,7 @@ go_library(
         "//pkg/sentry/platform",
         "//pkg/sentry/platform/kvm",
         "//pkg/sentry/platform/ptrace",
+        "//pkg/sentry/seccheck",
         "//pkg/sentry/time",
         "//pkg/sentry/vfs",
         "//pkg/sync",

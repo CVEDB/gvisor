@@ -12,14 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build amd64
+// +build amd64
+
 package sysmsg
 
 import (
+	_ "embed"
 	"fmt"
 	"strings"
 
 	"gvisor.dev/gvisor/pkg/cpuid"
 )
+
+// SighandlerBlob contains the compiled code of the sysmsg signal handler.
+//
+//go:embed sighandler.built-in.amd64.bin
+var SighandlerBlob []byte
 
 // ArchState defines variables specific to the architecture being
 // used.
@@ -42,11 +51,8 @@ func (s *ArchState) Init() {
 
 	fpLenUint, _ := fs.ExtendedStateSize()
 	s.fpLen = uint32(fpLenUint)
-	if fs.UseXsavec() {
-		s.xsaveMode = xsavec
-	} else if fs.UseXsaveopt() {
-		s.xsaveMode = xsaveopt
-	} else if fs.UseXsave() {
+	// TODO(b/268366549): Fix use of xsavec/xsaveopt.
+	if fs.UseXsave() {
 		s.xsaveMode = xsave
 	} else {
 		s.xsaveMode = fxsave
@@ -57,10 +63,16 @@ func (s *ArchState) Init() {
 	}
 }
 
+// FpLen returns the FP state length for AMD64.
+func (s *ArchState) FpLen() int {
+	return int(s.fpLen)
+}
+
 func (s *ArchState) String() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "sysmsg.ArchState{")
 	fmt.Fprintf(&b, " xsaveMode %d", s.xsaveMode)
+	fmt.Fprintf(&b, " fsgsbase %d", s.fsgsbase)
 	fmt.Fprintf(&b, " fpLen %d", s.fpLen)
 	b.WriteString(" }")
 

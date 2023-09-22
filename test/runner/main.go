@@ -55,6 +55,7 @@ var (
 	container          = flag.Bool("container", false, "run tests in their own namespaces (user ns, network ns, etc), pretending to be root. Implicitly enabled if network=host, or if using network namespaces")
 	setupContainerPath = flag.String("setup-container", "", "path to setup_container binary (for use with --container)")
 	trace              = flag.Bool("trace", false, "enables all trace points")
+	directfs           = flag.Bool("directfs", false, "enables directfs (for all gofer mounts)")
 
 	addHostUDS       = flag.Bool("add-host-uds", false, "expose a tree of UDS to test communication with the host")
 	addHostConnector = flag.Bool("add-host-connector", false, "create goroutines that connect to bound UDS that will be created by sandbox")
@@ -62,7 +63,8 @@ var (
 	ioUring          = flag.Bool("iouring", false, "Enables IO_URING API for asynchronous I/O")
 	// TODO(gvisor.dev/issue/4572): properly support leak checking for runsc, and
 	// set to true as the default for the test runner.
-	leakCheck = flag.Bool("leak-check", false, "check for reference leaks")
+	leakCheck  = flag.Bool("leak-check", false, "check for reference leaks")
+	waitForPid = flag.Duration("delay-for-debugger", 0, "Print out the sandbox PID and wait for the specified duration to start the test. This is useful for attaching a debugger to the runsc-sandbox process.")
 )
 
 const (
@@ -223,15 +225,23 @@ func runRunsc(tc *gtest.TestCase, spec *specs.Spec) error {
 		"-log-format=text",
 		"-TESTONLY-unsafe-nonroot=true",
 		"-TESTONLY-allow-packet-endpoint-write=true",
-		"-net-raw=true",
 		fmt.Sprintf("-panic-signal=%d", unix.SIGTERM),
 		fmt.Sprintf("-iouring=%t", *ioUring),
 		"-watchdog-action=panic",
 		"-platform", *platform,
 		"-file-access", *fileAccess,
+		"-gvisor-gro=200000ns",
+	}
+
+	if *network == "host" && !specutils.HasCapabilities(capability.CAP_NET_RAW) {
+		log.Warningf("Testing with network=host but host does not have CAP_NET_RAW. Raw socket support will be disabled.")
+	} else {
+		args = append(args, "-net-raw")
 	}
 	if *overlay {
 		args = append(args, "-overlay2=all:dir=/tmp")
+	} else {
+		args = append(args, "-overlay2=none")
 	}
 	if *debug {
 		args = append(args, "-debug", "-log-packets=true")
@@ -259,6 +269,9 @@ func runRunsc(tc *gtest.TestCase, spec *specs.Spec) error {
 		log.Infof("Enabling all trace points: %s", flag)
 		args = append(args, flag)
 	}
+	if *directfs {
+		args = append(args, "-directfs")
+	}
 
 	testLogDir := ""
 	if undeclaredOutputsDir, ok := unix.Getenv("TEST_UNDECLARED_OUTPUTS_DIR"); ok {
@@ -284,9 +297,7 @@ func runRunsc(tc *gtest.TestCase, spec *specs.Spec) error {
 
 	// Current process doesn't have CAP_SYS_ADMIN, create user namespace and run
 	// as root inside that namespace to get it.
-	rArgs := append(args, "run", "--bundle", bundleDir, id)
-	cmd := exec.Command(specutils.ExePath, rArgs...)
-	cmd.SysProcAttr = &unix.SysProcAttr{
+	sysProcAttr := &unix.SysProcAttr{
 		Cloneflags: unix.CLONE_NEWUSER | unix.CLONE_NEWNS,
 		// Set current user/group as root inside the namespace.
 		UidMappings: []syscall.SysProcIDMap{
@@ -301,6 +312,41 @@ func runRunsc(tc *gtest.TestCase, spec *specs.Spec) error {
 			Gid: 0,
 		},
 	}
+	var cmdArgs []string
+	if *waitForPid != 0 {
+		createArgs := append(args, "create", "-pid-file", filepath.Join(testLogDir, "pid"), "--bundle", bundleDir, id)
+		defer os.Remove(filepath.Join(testLogDir, "pid"))
+		createCmd := exec.Command(specutils.ExePath, createArgs...)
+		createCmd.SysProcAttr = sysProcAttr
+		createCmd.Stdout = os.Stdout
+		createCmd.Stderr = os.Stderr
+		if err := createCmd.Run(); err != nil {
+			return fmt.Errorf("could not create sandbox: %v", err)
+		}
+
+		sandboxPidBytes, err := os.ReadFile(filepath.Join(testLogDir, "pid"))
+		if err != nil {
+			return fmt.Errorf("could not read pid file: %v", err)
+		}
+		log.Infof("Sandbox process ID is %s. You can attach to it from a debugger of your choice.", sandboxPidBytes)
+		log.Infof("For example, with Delve you can call: $ dlv attach %s", sandboxPidBytes)
+		log.Infof("The test will automatically start after %s.", *waitForPid)
+		log.Infof("You may also signal the test process to start the test immediately: $ kill -SIGUSR1 %d", os.Getpid())
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, unix.SIGUSR1)
+		select {
+		case <-sigCh:
+		case <-time.After(*waitForPid):
+		}
+		signal.Reset(unix.SIGUSR1)
+
+		cmdArgs = append(args, "start", id)
+	} else {
+		cmdArgs = append(args, "run", "--bundle", bundleDir, id)
+	}
+	cmd := exec.Command(specutils.ExePath, cmdArgs...)
+	cmd.SysProcAttr = sysProcAttr
 	if *container || *network == "host" || (cmd.SysProcAttr.Cloneflags&unix.CLONE_NEWNET != 0) {
 		cmd.SysProcAttr.Cloneflags |= unix.CLONE_NEWNET
 		cmd.Path = getSetupContainerPath()
@@ -347,6 +393,17 @@ func runRunsc(tc *gtest.TestCase, spec *specs.Spec) error {
 	}()
 
 	err = cmd.Run()
+	if *waitForPid != 0 {
+		if err != nil {
+			return fmt.Errorf("could not start container: %v", err)
+		}
+		waitArgs := append(args, "wait", id)
+		waitCmd := exec.Command(specutils.ExePath, waitArgs...)
+		waitCmd.SysProcAttr = sysProcAttr
+		waitCmd.Stdout = os.Stdout
+		waitCmd.Stderr = os.Stderr
+		err = waitCmd.Run()
+	}
 	if err == nil && len(testLogDir) > 0 {
 		// If the test passed, then we erase the log directory. This speeds up
 		// uploading logs in continuous integration & saves on disk space.
@@ -515,6 +572,20 @@ func runTestCaseRunsc(testBin string, tc *gtest.TestCase, args []string, t *test
 			Destination: "/fuse",
 			Type:        "tmpfs",
 		})
+	}
+	if *network == "host" {
+		// If host does not have CAP_NET_ADMIN or CAP_NET_RAW, then we
+		// must drop those caps inside the sandbox, since we will not
+		// be able to perform those operations with hostinet.
+		if !specutils.HasCapabilities(capability.CAP_NET_ADMIN) {
+			log.Warningf("Running with network=host, but host does not have CAP_NET_ADMIN. Dropping this capability inside the sandbox.")
+			specutils.DropCapability(spec.Process.Capabilities, "CAP_NET_ADMIN")
+
+		}
+		if !specutils.HasCapabilities(capability.CAP_NET_RAW) {
+			log.Warningf("Running with network=host, but host does not have CAP_NET_RAW. Dropping this capability inside the sandbox.")
+			specutils.DropCapability(spec.Process.Capabilities, "CAP_NET_RAW")
+		}
 	}
 
 	// Set environment variables that indicate we are running in gVisor with

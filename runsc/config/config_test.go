@@ -15,6 +15,7 @@
 package config
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -251,7 +252,7 @@ func TestValidationFail(t *testing.T) {
 			name: "shared+overlay",
 			flags: map[string]string{
 				"file-access": "shared",
-				"overlay":     "true",
+				"overlay2":    "root:self",
 			},
 			error: "overlay flag is incompatible",
 		},
@@ -598,7 +599,7 @@ func TestBundles(t *testing.T) {
 			},
 		},
 		{
-			Name: "command line takes precedence to non-default value",
+			Name: "bundle takes precedence over command-line value",
 			BundleConfig: map[BundleName]Bundle{
 				"no-debug": {
 					"debug": "false",
@@ -608,26 +609,25 @@ func TestBundles(t *testing.T) {
 			Bundles:     []BundleName{"no-debug"},
 			Verify: func(t *testing.T, old, new *Config) {
 				t.Helper()
-				noChange(t, old, new)
-				if !new.Debug {
-					t.Error("debug was not set to true")
+				if new.Debug {
+					t.Error("debug is still true")
 				}
 			},
 		},
 		{
-			Name: "command line takes precedence to default value",
+			Name: "command line matching bundle value",
 			BundleConfig: map[BundleName]Bundle{
 				"debug": {
 					"debug": "true",
 				},
 			},
-			CommandLine: []string{"-debug=false"},
+			CommandLine: []string{"-debug=true"},
 			Bundles:     []BundleName{"debug"},
 			Verify: func(t *testing.T, old, new *Config) {
 				t.Helper()
 				noChange(t, old, new)
-				if new.Debug {
-					t.Error("debug was set to true")
+				if !new.Debug {
+					t.Error("debug was set to false")
 				}
 			},
 		},
@@ -655,7 +655,10 @@ func TestBundles(t *testing.T) {
 			if !test.WantErr && err != nil {
 				t.Errorf("got unexpected error: %v", err)
 			}
-			if err != nil && test.Verify != nil && !t.Failed() {
+			if t.Failed() {
+				return
+			}
+			if err != nil && test.Verify != nil {
 				t.Error("cannot specify Verify function for erroring tests")
 			}
 			if err == nil && test.Verify != nil {
@@ -663,4 +666,115 @@ func TestBundles(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBundleValidate(t *testing.T) {
+	defaultVerify := func(err error) error { return err }
+	for _, tc := range []struct {
+		name   string
+		bundle Bundle
+		verify func(err error) error
+	}{
+		{
+			name:   "empty bundle",
+			bundle: Bundle(map[string]string{}),
+			verify: defaultVerify,
+		},
+		{
+			name:   "invalid flag bundle",
+			bundle: Bundle(map[string]string{"not-a-real-flag": "true"}),
+			verify: func(err error) error {
+				want := `unknown flag "not-a-real-flag"`
+				if !strings.Contains(err.Error(), want) {
+					return fmt.Errorf("mismatch error: got: %q want: %q", err.Error(), want)
+				}
+				return nil
+			},
+		},
+		{
+			name:   "invalid value",
+			bundle: Bundle(map[string]string{"debug": "invalid"}),
+			verify: func(err error) error {
+				want := `parsing "invalid": invalid syntax`
+				if !strings.Contains(err.Error(), want) {
+					return fmt.Errorf("mismatch error: got: %q want: %q", err.Error(), want)
+				}
+				return nil
+			},
+		},
+		{
+			name:   "valid flag bundle",
+			bundle: Bundle(map[string]string{"debug": "true"}),
+			verify: defaultVerify,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.verify(tc.bundle.Validate()); err != nil {
+				t.Fatalf("Validate failed: %v", err)
+			}
+		})
+	}
+}
+
+func TestToContinerdConfigTOML(t *testing.T) {
+	header := `binary_name = "%s"
+root = "%s"
+`
+	opt := ContainerdConfigOptions{
+		BinaryPath: "/path/to/runsc",
+		RootPath:   "/path/to/root",
+	}
+	header = fmt.Sprintf(header, opt.BinaryPath, opt.RootPath)
+
+	for _, tc := range []struct {
+		name        string
+		bundle      Bundle
+		want        string
+		createError error
+	}{
+		{
+			name: "empty bundle",
+			want: header,
+		},
+		{
+			name:   "valid flag bundle",
+			bundle: Bundle(map[string]string{"debug": "true"}),
+			want: func() string {
+				flagStr := "[runsc_config]\n  debug = \"true\"\n"
+				return strings.Join([]string{header, flagStr}, "")
+			}(),
+		},
+		{
+			name:        "invalid flag bundle",
+			bundle:      Bundle(map[string]string{"not-a-real-flag": "true"}),
+			createError: fmt.Errorf("unknown flag \"not-a-real-flag\""),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := NewFromBundle(tc.bundle)
+			if tc.createError != nil {
+				if err == nil {
+					t.Fatalf("got no error, but expected one")
+				}
+				if !strings.Contains(err.Error(), tc.createError.Error()) {
+					t.Fatalf("mismatch error: got: %q want: %q", err.Error(), tc.createError.Error())
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("NewFromBundle failed: %v", err)
+			}
+
+			toml, err := cfg.ToContainerdConfigTOML(opt)
+			if err != nil {
+				t.Fatalf("ToContainerdConfigTOML failed: %v", err)
+			}
+			if diff := cmp.Diff(tc.want, toml); diff != "" {
+				t.Fatalf("mismatch strings: %s", diff)
+			}
+
+		})
+	}
+
 }

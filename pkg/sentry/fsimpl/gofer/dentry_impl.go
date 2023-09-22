@@ -248,7 +248,7 @@ func (d *dentry) getRemoteChild(ctx context.Context, name string) (*dentry, erro
 // Postcondition: The returned dentry is already cached appropriately.
 //
 // +checklocksread:d.opMu
-func (d *dentry) getRemoteChildAndWalkPathLocked(ctx context.Context, rp *vfs.ResolvingPath, ds **[]*dentry) (*dentry, error) {
+func (d *dentry) getRemoteChildAndWalkPathLocked(ctx context.Context, rp resolvingPath, ds **[]*dentry) (*dentry, error) {
 	switch dt := d.impl.(type) {
 	case *lisafsDentry:
 		return dt.getRemoteChildAndWalkPathLocked(ctx, rp, ds)
@@ -325,7 +325,9 @@ func (d *dentry) mknod(ctx context.Context, name string, creds *auth.Credentials
 	}
 }
 
-// Precondition: !d.isSynthetic().
+// Preconditions:
+//   - !d.isSynthetic().
+//   - d.fs.renameMu must be locked.
 func (d *dentry) link(ctx context.Context, target *dentry, name string) (*dentry, error) {
 	switch dt := d.impl.(type) {
 	case *lisafsDentry:
@@ -490,7 +492,7 @@ func (fs *filesystem) restoreRoot(ctx context.Context, opts *vfs.CompleteRestore
 	case *lisafsDentry:
 		return dt.restoreFile(ctx, &rootInode, opts)
 	case *directfsDentry:
-		dt.rootControlFDLisa = fs.client.NewFD(rootInode.ControlFD)
+		dt.controlFDLisa = fs.client.NewFD(rootInode.ControlFD)
 		return dt.restoreFile(ctx, rootHostFD, opts)
 	default:
 		panic("unknown dentry implementation")

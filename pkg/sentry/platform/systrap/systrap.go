@@ -55,13 +55,13 @@ import (
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	pkgcontext "gvisor.dev/gvisor/pkg/context"
-	"gvisor.dev/gvisor/pkg/cpuid"
 	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/memutil"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
 	"gvisor.dev/gvisor/pkg/sentry/platform"
 	"gvisor.dev/gvisor/pkg/sentry/platform/interrupt"
+	"gvisor.dev/gvisor/pkg/sentry/platform/systrap/sysmsg"
 	"gvisor.dev/gvisor/pkg/sentry/platform/systrap/usertrap"
 )
 
@@ -74,12 +74,22 @@ var (
 
 	stubInitProcess uintptr
 
+	// Memory region to store thread specific stacks.
 	stubSysmsgStack uintptr
 	stubSysmsgStart uintptr
 	stubSysmsgEnd   uintptr
+	// Memory region to store the contextQueue.
+	stubContextQueueRegion    uintptr
+	stubContextQueueRegionLen uintptr
+	// Memory region to store instances of sysmsg.ThreadContext.
+	stubContextRegion    uintptr
+	stubContextRegionLen uintptr
 	// The memory blob with precompiled seccomp rules.
 	stubSysmsgRules    uintptr
 	stubSysmsgRulesLen uintptr
+
+	stubSpinningThreadQueueAddr uintptr
+	stubSpinningThreadQueueSize uintptr
 
 	// stubROMapEnd is the end address of the read-only stub region that
 	// contains the code and precompiled seccomp rules.
@@ -91,6 +101,9 @@ var (
 
 	// stubInitialized controls one-time stub initialization.
 	stubInitialized sync.Once
+
+	// archState stores architecture-specific details used in the platform.
+	archState sysmsg.ArchState
 )
 
 // context is an implementation of the platform context.
@@ -101,10 +114,11 @@ type context struct {
 	// interrupt is the interrupt context.
 	interrupt interrupt.Forwarder
 
-	// subprocess is the current subprocess used to execute the context.
-	// It is only updated in Switch, and used in Release, so only on the task
-	// goroutine.
-	subprocess *subprocess
+	// sharedContext is everything related to this context that is resident in
+	// shared memory with the stub thread.
+	// sharedContext is only accessed on the Task goroutine, therefore it is not
+	// mutex protected.
+	sharedContext *sharedContext
 
 	// mu protects the following fields.
 	mu sync.Mutex
@@ -123,11 +137,8 @@ type context struct {
 	lastFaultIP hostarch.Addr
 
 	// sysmsgThread is a sysmsg thread descriptor which is used to execute
-	// application code.
+	// application code. (Note: Unused if contextDecouplingExp=true).
 	sysmsgThread *sysmsgThread
-
-	// fpLen is the size of the floating point context.
-	fpLen int
 
 	// needRestoreFPState indicates that the FPU state has been changed by
 	// the Sentry and has to be updated on the stub thread.
@@ -159,16 +170,12 @@ func (c *context) FullStateChanged() {
 
 // Switch runs the provided context in the given address space.
 func (c *context) Switch(ctx pkgcontext.Context, mm platform.MemoryManager, ac *arch.Context64, cpu int32) (*linux.SignalInfo, hostarch.AccessType, error) {
-	c.needToPullFullState = true
-
 	as := mm.AddressSpace()
 	s := as.(*subprocess)
-
-	if s != c.subprocess {
-		c.subprocess.unregisterContext(c)
-		c.subprocess = s
-		s.numContexts.Add(1)
+	if err := s.activateContext(c); err != nil {
+		return nil, hostarch.NoAccess, err
 	}
+
 restart:
 	isSyscall, needPatch, err := s.switchToApp(c, ac)
 	if err != nil {
@@ -206,8 +213,8 @@ restart:
 	lastFaultSP := c.lastFaultSP
 	lastFaultAddr := c.lastFaultAddr
 	lastFaultIP := c.lastFaultIP
-	// At this point, c may not yet be in s.contexts, so c.lastFaultSP won't be
-	// updated by s.Unmap(). This is fine; we only need to synchronize with
+	// At this point, c may not yet be in s.faultedContexts, so c.lastFaultSP won't
+	// be updated by s.Unmap(). This is fine; we only need to synchronize with
 	// calls to s.Unmap() that occur after the handling of this fault.
 	c.lastFaultSP = faultSP
 	c.lastFaultAddr = faultAddr
@@ -218,12 +225,12 @@ restart:
 	if lastFaultSP != faultSP {
 		if lastFaultSP != nil {
 			lastFaultSP.mu.Lock()
-			delete(lastFaultSP.contexts, c)
+			delete(lastFaultSP.faultedContexts, c)
 			lastFaultSP.mu.Unlock()
 		}
 		if faultSP != nil {
 			faultSP.mu.Lock()
-			faultSP.contexts[c] = struct{}{}
+			faultSP.faultedContexts[c] = struct{}{}
 			faultSP.mu.Unlock()
 		}
 	}
@@ -274,11 +281,17 @@ func (c *context) Release() {
 	if c.sysmsgThread != nil {
 		c.sysmsgThread.destroy()
 	}
-	c.subprocess.unregisterContext(c)
+	if c.sharedContext != nil {
+		c.sharedContext.release()
+		c.sharedContext = nil
+	}
 }
 
 // PrepareSleep implements platform.Context.platform.PrepareSleep.
 func (c *context) PrepareSleep() {
+	if contextDecouplingExp {
+		return // When this is called context hasn't entered the context queue.
+	}
 	if c.sysmsgThread != nil {
 		c.sysmsgThread.msg.DisableStubFastPath()
 	}
@@ -301,6 +314,9 @@ func (*Systrap) MinUserAddress() hostarch.Addr {
 
 // New returns a new seccomp-based implementation of the platform interface.
 func New() (*Systrap, error) {
+	// CPUID information has been initialized at this point.
+	archState.Init()
+
 	mf, err := createMemoryFile()
 	if err != nil {
 		return nil, err
@@ -317,6 +333,8 @@ func New() (*Systrap, error) {
 			// Should never happen.
 			panic("unable to initialize systrap source: " + err.Error())
 		}
+		// The source subprocess is never released explicitly by a MM.
+		source.DecRef(nil)
 
 		globalPool.source = source
 	})
@@ -355,10 +373,7 @@ func (p *Systrap) NewAddressSpace(any) (platform.AddressSpace, <-chan struct{}, 
 
 // NewContext returns an interruptible context.
 func (*Systrap) NewContext(ctx pkgcontext.Context) platform.Context {
-	fs := cpuid.FromContext(ctx)
-	fpLen, _ := fs.ExtendedStateSize()
 	return &context{
-		fpLen:               int(fpLen),
 		needRestoreFPState:  true,
 		needToPullFullState: false,
 	}
@@ -374,7 +389,7 @@ func (*constructor) OpenDevice(_ string) (*os.File, error) {
 	return nil, nil
 }
 
-// Flags implements platform.Constructor.Flags().
+// Requirements implements platform.Constructor.Requirements().
 func (*constructor) Requirements() platform.Requirements {
 	// TODO(b/75837838): Also set a new PID namespace so that we limit
 	// access to other host processes.

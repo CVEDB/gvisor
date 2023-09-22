@@ -2,7 +2,10 @@ load("//tools:defs.bzl", "bzl_library", "pkg_tar")
 load("//website:defs.bzl", "doc", "docs")
 load("//images:defs.bzl", "docker_image")
 
-package(licenses = ["notice"])
+package(
+    default_applicable_licenses = ["//:license"],
+    licenses = ["notice"],
+)
 
 docker_image(
     name = "website",
@@ -109,8 +112,8 @@ genrule(
 pkg_tar(
     name = "config",
     srcs = [
-        ":css",
         "_config.yml",
+        ":css",
         "//website/blog:index.html",
     ] + glob([
         "assets/**",
